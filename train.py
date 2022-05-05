@@ -327,6 +327,7 @@ class STPM(pl.LightningModule):
     
     def on_test_start(self):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        
         self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
         if torch.cuda.is_available():
             res = faiss.StandardGpuResources()
@@ -373,7 +374,7 @@ class STPM(pl.LightningModule):
         embedding_ = embedding_concat(embeddings[0], embeddings[1])
         embedding_test = np.array(reshape_embedding(np.array(embedding_)))
         score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors)
-        anomaly_map = score_patches[:,0].reshape((28,28))
+        anomaly_map = score_patches[:,0].reshape((16,16))
         N_b = score_patches[np.argmax(score_patches[:,0])]
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
         score = w*max(score_patches[:,0]) # Image-level score
@@ -418,11 +419,11 @@ def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
-    parser.add_argument('--category', default='carpet')
+    parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=256) # 256
-    parser.add_argument('--input_size', default=224)
+    parser.add_argument('--input_size', default=128)
     parser.add_argument('--coreset_sampling_ratio', default=0.001)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
