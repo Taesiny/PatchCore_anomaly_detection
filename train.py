@@ -251,14 +251,16 @@ class STPM(pl.LightningModule):
         def hook_t(module, input, output):
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnext50_32x4d', pretrained=True)
+        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'shufflenet_v2_x1_0', pretrained=True)
 
         for param in self.model.parameters():
             param.requires_grad = False
 
-        self.model.layer2[-1].register_forward_hook(hook_t)
-        self.model.layer3[-1].register_forward_hook(hook_t)
-
+        # self.model.layer2[-1].register_forward_hook(hook_t)
+        # self.model.layer3[-1].register_forward_hook(hook_t)
+        self.model.stage2[-1].register_forward_hook(hook_t)
+        self.model.stage3[-1].register_forward_hook(hook_t)
+        
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
         self.init_results_list()
