@@ -111,9 +111,9 @@ def prep_dirs(root):
     sample_path = os.path.join(root, 'sample')
     os.makedirs(sample_path, exist_ok=True)
     # make source code record dir & copy
-    # source_code_save_path = os.path.join(root, 'src')
+    source_code_save_path = os.path.join(root, 'src')
     # os.makedirs(source_code_save_path, exist_ok=True)
-    copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README','samples','LICENSE']) # copy source code
+    # copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README','samples','LICENSE']) # copy source code
     return embeddings_path, sample_path, source_code_save_path
 
 def embedding_concat(x, y):
