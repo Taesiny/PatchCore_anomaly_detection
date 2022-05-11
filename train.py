@@ -24,6 +24,7 @@ import pytorch_lightning as pl
 from sklearn.metrics import confusion_matrix
 import pickle
 from sampling_methods.kcenter_greedy import kCenterGreedy
+from sampling_methods.kcenter_greedy_iden import kCenterGreedyIden
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
 from scipy.ndimage import gaussian_filter
@@ -353,7 +354,9 @@ class STPM(pl.LightningModule):
         self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
         self.randomprojector.fit(total_embeddings)
         # Coreset Subsampling
+        # selector = kCenterGreedyIden(total_embeddings,0,0)
         selector = kCenterGreedy(total_embeddings,0,0)
+        
         selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*float(args.coreset_sampling_ratio)))
         self.embedding_coreset = total_embeddings[selected_idx]
         
