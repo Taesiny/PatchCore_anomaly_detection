@@ -98,24 +98,24 @@ def copy_files(src, dst, ignores=[]):
         if ignore_check:
             continue
         full_file_name = os.path.join(src, file_name)
-        if os.path.isfile(full_file_name):
+        if '.py' in full_file_name:
             shutil.copy(full_file_name, os.path.join(dst,file_name))
-        if os.path.isdir(full_file_name):
-            os.makedirs(os.path.join(dst, file_name), exist_ok=True)
-            copy_files(full_file_name, os.path.join(dst, file_name), ignores)
+        # if os.path.isdir(full_file_name):
+        #     os.makedirs(os.path.join(dst, file_name), exist_ok=True)
+        #     copy_files(full_file_name, os.path.join(dst, file_name), ignores)
 
 def prep_dirs(root):
     # make embeddings dir
     # embeddings_path = os.path.join(root, 'embeddings')
-    embeddings_path = os.path.join('./', 'embeddings', args.category)
+    embeddings_path = os.path.join(root, 'embeddings', args.category)
     os.makedirs(embeddings_path, exist_ok=True)
     # make sample dir
     sample_path = os.path.join(root, 'sample')
     os.makedirs(sample_path, exist_ok=True)
     # make source code record dir & copy
     source_code_save_path = os.path.join(root, 'src')
-    # os.makedirs(source_code_save_path, exist_ok=True)
-    # copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README','samples','LICENSE']) # copy source code
+    os.makedirs(source_code_save_path, exist_ok=True)
+    copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README','samples','LICENSE']) # copy source code
     return embeddings_path, sample_path, source_code_save_path
 
 def embedding_concat(x, y):
@@ -253,13 +253,13 @@ class STPM(pl.LightningModule):
         def hook_t(module, input, output):
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
-        s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
-        for t in list(s_d['state_dict'].items()):
-          for name in self.model.state_dict():
-            if 'backbone' in t[0]:
-              if t[0][9:] == name:
-                self.model.state_dict()[name].copy_(t[1])
+        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=False)
+        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        # for t in list(s_d['state_dict'].items()):
+        #   for name in self.model.state_dict():
+        #     if 'backbone' in t[0]:
+        #       if t[0][9:] == name:
+        #         self.model.state_dict()[name].copy_(t[1])
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -332,18 +332,18 @@ class STPM(pl.LightningModule):
 
     def on_train_start(self):
         self.model.eval() # to stop running_var move (maybe not critical)
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         self.embedding_list = []
     
     def on_test_start(self):
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         
         self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
         if torch.cuda.is_available():
             res = faiss.StandardGpuResources()
             self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         self.init_results_list()
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+        # self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
@@ -407,6 +407,8 @@ class STPM(pl.LightningModule):
 
     def test_epoch_end(self, outputs):
         print("Total pixel-level auc-roc score :")
+        print(self.gt_list_img_lvl)
+        print(self.pred_list_img_lvl)
         pixel_auc = roc_auc_score(self.gt_list_px_lvl, self.pred_list_px_lvl)
         print(pixel_auc)
         print("Total image-level auc-roc score :")
@@ -436,8 +438,8 @@ def get_args():
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=384) # 256
-    parser.add_argument('--input_size', default=384)
+    parser.add_argument('--load_size', default=256) # 256
+    parser.add_argument('--input_size', default=256)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
