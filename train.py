@@ -252,15 +252,15 @@ class STPM(pl.LightningModule):
         def hook_t(module, input, output):
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'shufflenet_v2_x1_0', pretrained=True)
+        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'shufflenet_v2_x0_5', pretrained=True)
 
         for param in self.model.parameters():
             param.requires_grad = False
 
-        # self.model.layer2[-1].register_forward_hook(hook_t)
-        # self.model.layer3[-1].register_forward_hook(hook_t)
-        self.model.stage2[-1].register_forward_hook(hook_t)
-        self.model.stage3[-1].register_forward_hook(hook_t)
+        self.model.layer2[-1].register_forward_hook(hook_t)
+        self.model.layer3[-1].register_forward_hook(hook_t)
+        # self.model.stage2[-1].register_forward_hook(hook_t)
+        # self.model.stage3[-1].register_forward_hook(hook_t)
         
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -351,7 +351,8 @@ class STPM(pl.LightningModule):
     def training_epoch_end(self, outputs): 
         total_embeddings = np.array(self.embedding_list)
         # Random projection
-        self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
+        # self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
+        self.randomprojector = SparseRandomProjection(n_components=120, eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
         self.randomprojector.fit(total_embeddings)
         # Coreset Subsampling
         # selector = kCenterGreedyIden(total_embeddings,0,0)
@@ -379,7 +380,7 @@ class STPM(pl.LightningModule):
         embedding_ = embedding_concat(embeddings[0], embeddings[1])
         embedding_test = np.array(reshape_embedding(np.array(embedding_)))
         score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors)
-        anomaly_map = score_patches[:,0].reshape((4,4))
+        anomaly_map = score_patches[:,0].reshape((28,28))
         N_b = score_patches[np.argmax(score_patches[:,0])]
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
         score = w*max(score_patches[:,0]) # Image-level score
@@ -425,10 +426,10 @@ def get_args():
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
-    parser.add_argument('--num_epochs', default=2)
+    parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=32) # 256
-    parser.add_argument('--input_size', default=32)
+    parser.add_argument('--load_size', default=256) # 256
+    parser.add_argument('--input_size', default=224)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
