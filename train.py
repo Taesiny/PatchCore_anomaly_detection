@@ -16,6 +16,7 @@ import torch
 import glob
 import cv2
 import os
+import math
 
 from PIL import Image
 from sklearn.metrics import roc_auc_score
@@ -252,7 +253,7 @@ class STPM(pl.LightningModule):
         def hook_t(module, input, output):
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'shufflenet_v2_x0_5', pretrained=True)
+        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -380,7 +381,8 @@ class STPM(pl.LightningModule):
         embedding_ = embedding_concat(embeddings[0], embeddings[1])
         embedding_test = np.array(reshape_embedding(np.array(embedding_)))
         score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors)
-        anomaly_map = score_patches[:,0].reshape((28,28))
+        
+        anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
         N_b = score_patches[np.argmax(score_patches[:,0])]
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
         score = w*max(score_patches[:,0]) # Image-level score
