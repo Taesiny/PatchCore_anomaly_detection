@@ -254,12 +254,12 @@ class STPM(pl.LightningModule):
             self.features.append(output)
 
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
-        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
-        # for t in list(s_d['state_dict'].items()):
-        #   for name in self.model.state_dict():
-        #     if 'backbone' in t[0]:
-        #       if t[0][9:] == name:
-        #         self.model.state_dict()[name].copy_(t[1])
+        s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        for t in list(s_d['state_dict'].items()):
+          for name in self.model.state_dict():
+            if 'backbone' in t[0]:
+              if t[0][9:] == name:
+                self.model.state_dict()[name].copy_(t[1])
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -391,6 +391,8 @@ class STPM(pl.LightningModule):
         anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
         N_b = score_patches[np.argmax(score_patches[:,0])]
         w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+        if math.isnan(w):  
+          w = 1.0
         score = w*max(score_patches[:,0]) # Image-level score
         gt_np = gt.cpu().numpy()[0,0].astype(int)
         anomaly_map_resized = cv2.resize(anomaly_map, (args.input_size, args.input_size))
@@ -438,8 +440,8 @@ def get_args():
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=32) # 256
-    parser.add_argument('--input_size', default=32)
+    parser.add_argument('--load_size', default=64) # 256
+    parser.add_argument('--input_size', default=64)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
