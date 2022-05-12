@@ -254,6 +254,8 @@ class STPM(pl.LightningModule):
             self.features.append(output)
 
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
+
+        print('Using own weight')
         s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
         for t in list(s_d['state_dict'].items()):
           for name in self.model.state_dict():
@@ -440,8 +442,8 @@ def get_args():
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=64) # 256
-    parser.add_argument('--input_size', default=64)
+    parser.add_argument('--load_size', default=128) # 256
+    parser.add_argument('--input_size', default=128)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
