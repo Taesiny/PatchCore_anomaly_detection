@@ -146,7 +146,7 @@ mean_train = [0.485, 0.456, 0.406]
 std_train = [0.229, 0.224, 0.225]
 
 class MVTecDataset(Dataset):
-    def __init__(self, root, transform, gt_transform, phase):
+    def __init__(self, root, transform, gt_transform, phase, prop):
         if phase=='train':
             self.img_path = os.path.join(root, 'train')
         else:
@@ -155,9 +155,9 @@ class MVTecDataset(Dataset):
         self.transform = transform
         self.gt_transform = gt_transform
         # load dataset
-        self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset() # self.labels => good : 0, anomaly : 1
+        self.img_paths, self.gt_paths, self.labels, self.types = self.load_dataset(prop) # self.labels => good : 0, anomaly : 1
 
-    def load_dataset(self):
+    def load_dataset(self,prop):
 
         img_tot_paths = []
         gt_tot_paths = []
@@ -170,9 +170,13 @@ class MVTecDataset(Dataset):
             if defect_type == 'good':
                 img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
                 img_tot_paths.extend(img_paths)
+                img_tot_paths=img_tot_paths[:int(len(img_paths)*prop)]
                 gt_tot_paths.extend([0]*len(img_paths))
+                gt_tot_paths=gt_tot_paths[:int(len(img_paths)*prop)]
                 tot_labels.extend([0]*len(img_paths))
+                tot_labels=tot_labels[:int(len(img_paths)*prop)]
                 tot_types.extend(['good']*len(img_paths))
+                tot_types=tot_types[:int(len(img_paths)*prop)]
             else:
                 img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
                 gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
@@ -320,12 +324,12 @@ class STPM(pl.LightningModule):
         cv2.imwrite(os.path.join(self.sample_path, f'{x_type}_{file_name}_gt.jpg'), gt_img)
 
     def train_dataloader(self):
-        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train')
+        image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', prop=args.propotion)
         train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=0) #, pin_memory=True)
         return train_loader
 
     def test_dataloader(self):
-        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test')
+        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', prop=1.0)
         test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=0) #, pin_memory=True) # only work on batch_size=1, now.
         return test_loader
 
@@ -421,19 +425,19 @@ class STPM(pl.LightningModule):
         print('test_epoch_end')
         values = {'pixel_auc': pixel_auc, 'img_auc': img_auc}
         self.log_dict(values)
-        # anomaly_list = []
-        # normal_list = []
-        # for i in range(len(self.gt_list_img_lvl)):
-        #     if self.gt_list_img_lvl[i] == 1:
-        #         anomaly_list.append(self.pred_list_img_lvl[i])
-        #     else:
-        #         normal_list.append(self.pred_list_img_lvl[i])
+        anomaly_list = []
+        normal_list = []
+        for i in range(len(self.gt_list_img_lvl)):
+            if self.gt_list_img_lvl[i] == 1:
+                anomaly_list.append(self.pred_list_img_lvl[i])
+            else:
+                normal_list.append(self.pred_list_img_lvl[i])
 
-        # # thresholding
-        # # cal_confusion_matrix(self.gt_list_img_lvl, self.pred_list_img_lvl, img_path_list = self.img_path_list, thresh = 0.00097)
-        # # print()
-        # with open(args.project_root_path + r'/results.txt', 'a') as f:
-        #     f.write(args.category + ' : ' + str(values) + '\n')
+        # thresholding
+        # cal_confusion_matrix(self.gt_list_img_lvl, self.pred_list_img_lvl, img_path_list = self.img_path_list, thresh = 0.00097)
+        # print()
+        with open(args.project_root_path + r'/results.txt', 'a') as f:
+            f.write(args.category + ' : ' + str(values) + '\n')
 
 def get_args():
     parser = argparse.ArgumentParser(description='ANOMALYDETECTION')
@@ -442,13 +446,14 @@ def get_args():
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=128) # 256
-    parser.add_argument('--input_size', default=128)
+    parser.add_argument('--load_size', default=256) # 256
+    parser.add_argument('--input_size', default=256)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
+    parser.add_argument('--propotion', type=float, default=1.0)
     args = parser.parse_args()
     return args
 
