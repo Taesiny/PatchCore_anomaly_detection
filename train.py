@@ -287,17 +287,18 @@ class STPM(pl.LightningModule):
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
         self.init_results_list()
-
+        a = int(args.load_size)
+        
         self.data_transforms = transforms.Compose([
-                        transforms.Resize((args.load_size, args.load_size), Image.ANTIALIAS),
+                        transforms.Resize((a, a), Image.ANTIALIAS),
                         transforms.ToTensor(),
-                        transforms.CenterCrop(args.input_size),
+                        # transforms.CenterCrop(args.input_size),
                         transforms.Normalize(mean=mean_train,
                                             std=std_train)])
         self.gt_transforms = transforms.Compose([
-                        transforms.Resize((args.load_size, args.load_size)),
-                        transforms.ToTensor(),
-                        transforms.CenterCrop(args.input_size)])
+                        transforms.Resize((a, a)),
+                        # transforms.CenterCrop(args.input_size),
+                        transforms.ToTensor()])
 
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
 
@@ -410,7 +411,8 @@ class STPM(pl.LightningModule):
           w = 1.0
         score = w*max(score_patches[:,0]) # Image-level score
         gt_np = gt.cpu().numpy()[0,0].astype(int)
-        anomaly_map_resized = cv2.resize(anomaly_map, (args.input_size, args.input_size))
+        a = int(args.load_size)
+        anomaly_map_resized = cv2.resize(anomaly_map, (a, a))
         anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)
         self.gt_list_px_lvl.extend(gt_np.ravel())
         self.pred_list_px_lvl.extend(anomaly_map_resized_blur.ravel())
