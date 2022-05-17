@@ -170,13 +170,13 @@ class MVTecDataset(Dataset):
             if defect_type == 'good':
                 img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
                 img_tot_paths.extend(img_paths)
-                img_tot_paths=img_tot_paths[:int(len(img_paths)*prop)]
+                img_tot_paths=img_tot_paths[:prop]
                 gt_tot_paths.extend([0]*len(img_paths))
-                gt_tot_paths=gt_tot_paths[:int(len(img_paths)*prop)]
+                gt_tot_paths=gt_tot_paths[:prop]
                 tot_labels.extend([0]*len(img_paths))
-                tot_labels=tot_labels[:int(len(img_paths)*prop)]
+                tot_labels=tot_labels[:prop]
                 tot_types.extend(['good']*len(img_paths))
-                tot_types=tot_types[:int(len(img_paths)*prop)]
+                tot_types=tot_types[:prop]
                 print('#Training Examples:',len(img_tot_paths))
             else:
                 img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
@@ -260,20 +260,21 @@ class STPM(pl.LightningModule):
 
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
 
-        # print('Using Classification weight')
-        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
-        # for t in list(s_d['state_dict'].items()):
-        #   for name in self.model.state_dict():
-        #     if 'backbone' in t[0]:
-        #       if t[0][9:] == name:
-        #         self.model.state_dict()[name].copy_(t[1])
-        print('Using Detection weight')
-        s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
+        print('Using Classification weight')
+        s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
         for t in list(s_d['state_dict'].items()):
           for name in self.model.state_dict():
             if 'backbone' in t[0]:
-              if t[0][15:] == name:
+              if t[0][9:] == name:
                 self.model.state_dict()[name].copy_(t[1])
+
+        # print('Using Detection weight')
+        # s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
+        # for t in list(s_d['state_dict'].items()):
+        #   for name in self.model.state_dict():
+        #     if 'backbone' in t[0]:
+        #       if t[0][15:] == name:
+        #         self.model.state_dict()[name].copy_(t[1])
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -337,7 +338,7 @@ class STPM(pl.LightningModule):
         return train_loader
 
     def test_dataloader(self):
-        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', prop=1.0)
+        test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', prop=452)
         test_loader = DataLoader(test_datasets, batch_size=1, shuffle=False, num_workers=0) #, pin_memory=True) # only work on batch_size=1, now.
         return test_loader
 
@@ -461,7 +462,7 @@ def get_args():
     parser.add_argument('--save_src_code', default=True)
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
-    parser.add_argument('--propotion', type=float, default=1.0)
+    parser.add_argument('--propotion', type=int, default=452)
     args = parser.parse_args()
     return args
 
