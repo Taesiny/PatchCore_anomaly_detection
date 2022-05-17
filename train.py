@@ -177,6 +177,7 @@ class MVTecDataset(Dataset):
                 tot_labels=tot_labels[:int(len(img_paths)*prop)]
                 tot_types.extend(['good']*len(img_paths))
                 tot_types=tot_types[:int(len(img_paths)*prop)]
+                print('#Training Examples:',len(img_tot_paths))
             else:
                 img_paths = glob.glob(os.path.join(self.img_path, defect_type) + "/*.png")
                 gt_paths = glob.glob(os.path.join(self.gt_path, defect_type) + "/*.png")
@@ -259,12 +260,19 @@ class STPM(pl.LightningModule):
 
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
 
-        print('Using own weight')
-        s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        # print('Using Classification weight')
+        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        # for t in list(s_d['state_dict'].items()):
+        #   for name in self.model.state_dict():
+        #     if 'backbone' in t[0]:
+        #       if t[0][9:] == name:
+        #         self.model.state_dict()[name].copy_(t[1])
+        print('Using Detection weight')
+        s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
         for t in list(s_d['state_dict'].items()):
           for name in self.model.state_dict():
             if 'backbone' in t[0]:
-              if t[0][9:] == name:
+              if t[0][15:] == name:
                 self.model.state_dict()[name].copy_(t[1])
 
         for param in self.model.parameters():
@@ -446,8 +454,8 @@ def get_args():
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1)
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=256) # 256
-    parser.add_argument('--input_size', default=256)
+    parser.add_argument('--load_size', default=64) # 256
+    parser.add_argument('--input_size', default=64)
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
     parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
     parser.add_argument('--save_src_code', default=True)
