@@ -260,13 +260,45 @@ class STPM(pl.LightningModule):
 
         self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
 
-        print('Using Classification weight')
-        s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
-        for t in list(s_d['state_dict'].items()):
-          for name in self.model.state_dict():
-            if 'backbone' in t[0]:
-              if t[0][9:] == name:
-                self.model.state_dict()[name].copy_(t[1])
+        if args.pre_weight=='imagenet':
+          print('Using Imagenet weight')
+        elif args.pre_weight=='nanodet':
+          print('Using Detection weight')
+          s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
+        elif args.pre_weight=='elg':
+          s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        elif args.pre_weight=='mf':
+          s_d=torch.load('/content/drive/MyDrive/mmclassification/mf630/resnet18/best_accuracy_top-1_epoch_60.pth')
+
+        if args.pre_weight in ('nanodet','elg','mf'):
+
+          for t in list(s_d['state_dict'].items()):
+            for name in self.model.state_dict():
+              if 'backbone' in t[0]:
+                if args.pre_weight =='nanodet':
+                  if t[0][15:] == name:
+                    self.model.state_dict()[name].copy_(t[1])
+                else:
+                  if t[0][9:] == name:
+                    self.model.state_dict()[name].copy_(t[1])
+        
+
+        
+        # print('Using Classification (MF630) weight')
+        # s_d=torch.load('/content/drive/MyDrive/mmclassification/mf630/resnet18/best_accuracy_top-1_epoch_60.pth')
+        # for t in list(s_d['state_dict'].items()):
+        #   for name in self.model.state_dict():
+        #     if 'backbone' in t[0]:
+              # if t[0][9:] == name:
+              #   self.model.state_dict()[name].copy_(t[1])
+
+        # print('Using Classification (ELG4960) weight')
+        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
+        # for t in list(s_d['state_dict'].items()):
+        #   for name in self.model.state_dict():
+        #     if 'backbone' in t[0]:
+        #       if t[0][9:] == name:
+        #         self.model.state_dict()[name].copy_(t[1])
 
         # print('Using Detection weight')
         # s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
@@ -465,6 +497,7 @@ def get_args():
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452)
+    parser.add_argument('--pre_weight', default='imagenet')
     args = parser.parse_args()
     return args
 
