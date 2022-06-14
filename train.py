@@ -47,7 +47,7 @@ def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
     return dist
 
 
-class NN():
+class NN():  # defining Nearest Neighbour Search
 
     def __init__(self, X=None, Y=None, p=2):
         self.p = p
@@ -65,11 +65,11 @@ class NN():
             name = self.__class__.__name__
             raise RuntimeError(f"{name} wasn't trained. Need to execute {name}.train() first")
 
-        dist = distance_matrix(x, self.train_pts, self.p) ** (1 / self.p)
+        dist = distance_matrix(x, self.train_pts, self.p) ** (1 / self.p) # Euclidean Distance for p=2
         labels = torch.argmin(dist, dim=1)
         return self.train_label[labels]
 
-class KNN(NN):
+class KNN(NN): # K-Nearest-Neighbors, in practical not used ()
 
     def __init__(self, X=None, Y=None, k=3, p=2):
         self.k = k
@@ -118,12 +118,12 @@ def prep_dirs(root):
     copy_files('./', source_code_save_path, ['.git','.vscode','__pycache__','logs','README','samples','LICENSE']) # copy source code
     return embeddings_path, sample_path, source_code_save_path
 
-def embedding_concat(x, y):
+def embedding_concat(x, y): # concatenating features from different feature map scales
     # from https://github.com/xiahaifeng1995/PaDiM-Anomaly-Detection-Localization-master
     B, C1, H1, W1 = x.size()
     _, C2, H2, W2 = y.size()
     s = int(H1 / H2)
-    x = F.unfold(x, kernel_size=s, dilation=1, stride=s)
+    x = F.unfold(x, kernel_size=s, dilation=1, stride=s) # using unfold() to match the size
     x = x.view(B, C1, -1, H2, W2)
     z = torch.zeros(B, C1 + C2, x.size(2), H2, W2)
     for i in range(x.size(2)):
@@ -133,7 +133,7 @@ def embedding_concat(x, y):
 
     return z
 
-def reshape_embedding(embedding):
+def reshape_embedding(embedding): # reshape the features as 1-D vectors
     embedding_list = []
     for k in range(embedding.shape[0]):
         for i in range(embedding.shape[2]):
@@ -209,7 +209,7 @@ class MVTecDataset(Dataset):
 
         return img, gt, label, os.path.basename(img_path[:-4]), img_type
 
-
+# for the pixel-wise prediction
 def cvt2heatmap(gray):
     heatmap = cv2.applyColorMap(np.uint8(gray), cv2.COLORMAP_JET)
     return heatmap
@@ -255,12 +255,12 @@ class STPM(pl.LightningModule):
         self.save_hyperparameters(hparams)
 
         self.init_features()
-        def hook_t(module, input, output):
+        def hook_t(module, input, output): # hook func for extracting feature maps
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True)
+        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True) # load pretrained weight
 
-        if args.pre_weight=='imagenet':
+        if args.pre_weight=='imagenet': # just use the imagenet weight
           print('Using Imagenet weight')
         elif args.pre_weight=='nanodet':
           print('Using Detection weight')
@@ -283,35 +283,11 @@ class STPM(pl.LightningModule):
                     self.model.state_dict()[name].copy_(t[1])
         
 
-        
-        # print('Using Classification (MF630) weight')
-        # s_d=torch.load('/content/drive/MyDrive/mmclassification/mf630/resnet18/best_accuracy_top-1_epoch_60.pth')
-        # for t in list(s_d['state_dict'].items()):
-        #   for name in self.model.state_dict():
-        #     if 'backbone' in t[0]:
-              # if t[0][9:] == name:
-              #   self.model.state_dict()[name].copy_(t[1])
-
-        # print('Using Classification (ELG4960) weight')
-        # s_d=torch.load('/content/drive/MyDrive/mmclassification/own_data_new/resnet18/best_accuracy_top-1_epoch_300.pth')
-        # for t in list(s_d['state_dict'].items()):
-        #   for name in self.model.state_dict():
-        #     if 'backbone' in t[0]:
-        #       if t[0][9:] == name:
-        #         self.model.state_dict()[name].copy_(t[1])
-
-        # print('Using Detection weight')
-        # s_d=torch.load('/content/drive/MyDrive/workspace/synthdata/ELG4960_Out/2/nanodet-m_resnet18_1/model_best/model_best.ckpt')
-        # for t in list(s_d['state_dict'].items()):
-        #   for name in self.model.state_dict():
-        #     if 'backbone' in t[0]:
-        #       if t[0][15:] == name:
-        #         self.model.state_dict()[name].copy_(t[1])
 
         for param in self.model.parameters():
             param.requires_grad = False
 
-        self.model.layer2[-1].register_forward_hook(hook_t)
+        self.model.layer2[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
         self.model.layer3[-1].register_forward_hook(hook_t)
         # self.model.stage2[-1].register_forward_hook(hook_t)
         # self.model.stage3[-1].register_forward_hook(hook_t)
@@ -326,7 +302,7 @@ class STPM(pl.LightningModule):
                         transforms.ToTensor(),
                         # transforms.CenterCrop(args.input_size),
                         transforms.Normalize(mean=mean_train,
-                                            std=std_train)])
+                                            std=std_train)]) # resize input image size + normalization
         self.gt_transforms = transforms.Compose([
                         transforms.Resize((a, a)),
                         # transforms.CenterCrop(args.input_size),
@@ -349,7 +325,7 @@ class STPM(pl.LightningModule):
         _ = self.model(x_t)
         return self.features
 
-    def save_anomaly_map(self, anomaly_map, input_img, gt_img, file_name, x_type):
+    def save_anomaly_map(self, anomaly_map, input_img, gt_img, file_name, x_type): # for pixel-wise prediction, can be ignored
         if anomaly_map.shape != input_img.shape:
             anomaly_map = cv2.resize(anomaly_map, (input_img.shape[0], input_img.shape[1]))
         anomaly_map_norm = min_max_norm(anomaly_map)
@@ -386,19 +362,19 @@ class STPM(pl.LightningModule):
     def on_test_start(self):
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         
-        self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
+        self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
         if torch.cuda.is_available():
             res = faiss.StandardGpuResources()
             self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         self.init_results_list()
-        # self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(self.logger.log_dir)
+
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
         features = self(x)
         embeddings = []
         for feature in features:
-            m = torch.nn.AvgPool2d(3, 1, 1)
+            m = torch.nn.AvgPool2d(3, 1, 1) # using AvgPool2d to calculate local-aware features
             embeddings.append(m(feature))
         embedding = embedding_concat(embeddings[0], embeddings[1])
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
@@ -434,11 +410,10 @@ class STPM(pl.LightningModule):
             embeddings.append(m(feature))
         embedding_ = embedding_concat(embeddings[0], embeddings[1])
         embedding_test = np.array(reshape_embedding(np.array(embedding_)))
-        score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors)
-        
+        score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search        
         anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
         N_b = score_patches[np.argmax(score_patches[:,0])]
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b))))
+        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b)))) # scaling factor in paper
         if math.isnan(w):  
           w = 1.0
         score = w*max(score_patches[:,0]) # Image-level score
@@ -487,16 +462,16 @@ def get_args():
     parser.add_argument('--phase', choices=['train','test'], default='train')
     parser.add_argument('--dataset_path', default=r'./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
-    parser.add_argument('--num_epochs', default=1)
+    parser.add_argument('--num_epochs', default=1) # 1 iteration is enough
     parser.add_argument('--batch_size', default=32)
-    parser.add_argument('--load_size', default=64) # 256
-    parser.add_argument('--input_size', default=64)
+    parser.add_argument('--load_size', default=64) 
+    parser.add_argument('--input_size', default=64) # using same input size and load size for our data
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
-    parser.add_argument('--project_root_path', default=r'./test') # 'D:\Project_Train_Results\mvtec_anomaly_detection\210624\test') #
-    parser.add_argument('--save_src_code', default=True)
+    parser.add_argument('--project_root_path', default=r'./test') # location to save result
+    parser.add_argument('--save_src_code', default=True) 
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
-    parser.add_argument('--propotion', type=int, default=452)
+    parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
     parser.add_argument('--pre_weight', default='imagenet')
     args = parser.parse_args()
     return args
