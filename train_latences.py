@@ -17,6 +17,7 @@ import glob
 import cv2
 import os
 import math
+import time
 
 from PIL import Image
 from sklearn.metrics import roc_auc_score
@@ -255,6 +256,9 @@ class STPM(pl.LightningModule):
         super(STPM, self).__init__()
 
         self.save_hyperparameters(hparams)
+        self.measure_latences = False
+        self.file_name_latences = None
+        self.file_name_preparation_memory_bank = None
 
         self.init_features()
         def hook_t(module, input, output): # hook func for extracting feature maps
@@ -362,6 +366,13 @@ class STPM(pl.LightningModule):
         self.embedding_list = []
     
     def on_test_start(self):
+        if self.measure_latences:
+            if torch.cuda.is_available():
+                starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
+                starter.record() # start
+            else:
+                st = time.process_time_ns() # for devices not having cuda device
+
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         
         self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
@@ -369,6 +380,16 @@ class STPM(pl.LightningModule):
         #     res = faiss.StandardGpuResources()
         #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
         self.init_results_list()
+        if self.measure_latences:
+            if torch.cuda.is_available():
+                ender.record()
+                run_time = starter.elapsed_time(ender)
+            else:
+                et = time.process_time_ns()
+                run_time = (et - st) / 1000
+            with open(self.file_name_preparation_memory_bank, 'w') as f:
+                f.write(str(run_time))
+
 
         
     def training_step(self, batch, batch_idx): # save locally aware patch features
@@ -434,33 +455,42 @@ class STPM(pl.LightningModule):
     
     def test_step(self, batch, batch_idx): # Nearest Neighbour Search
         
-        warm_up = 100 # specify how often file should be processed before actual measurment
-        reps = 25 # repititions for more meaningful measurements due to averaging
-        run_times = [] # initialize timer
-        self.file_name_latences = 'latences.txt'
-        # warm_up
-        for run in range(warm_up):
-            _, _ = self.prediction_process_core(batch, batch_idx)
-        # measurement
-        for rep in range(reps):
-            #start timer
-            starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
-            starter.record() # start
-            score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
-            ender.record() #end
-            torch.cuda.synchronize() # wait for gpu sync
-            run_times += [starter.elapsed_time(ender)] # in ms, run time of process
-        assert len(run_times) == reps, "Something went wrong!"
-        latency = sum(run_times) / len(run_times)
-        if not math.isnan(latency):
-            if os.path.exists(self.file_name_latences):
-                with open(self.file_name_latences, 'a') as f:
-                    f.write(str(latency) + '\t')
+        if self.measure_latences:
+            warm_up = 100 # specify how often file should be processed before actual measurment
+            reps = 25 # repititions for more meaningful measurements due to averaging
+            run_times = [] # initialize timer
+            # self.file_name_latences = 'latences.txt'
+            # warm_up
+            for run in range(warm_up):
+                _, _ = self.prediction_process_core(batch, batch_idx)
+            # measurement
+            for rep in range(reps):
+                #start timer
+                if torch.cuda.is_available():
+                    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
+                    starter.record() # start
+                else:
+                    st = time.process_time() # for devices not having a cuda device
+                score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
+                if torch.cuda.is_available():
+                    ender.record() #end
+                    torch.cuda.synchronize() # wait for gpu sync
+                    run_times += [starter.elapsed_time(ender)] # in ms, run time of process
+                else:
+                    run_times += [(time.process_time() - st)*1000]
+            assert len(run_times) == reps, "Something went wrong!"
+            latency = float(sum(run_times) / len(run_times)) # mean
+            if not math.isnan(latency):
+                if os.path.exists(self.file_name_latences):
+                    with open(self.file_name_latences, 'a') as f:
+                        f.write(str(latency) + '\t')
+                else:
+                    with open(self.file_name_latences, 'w') as f:
+                        f.write(str(latency) + '\t')
             else:
-                with open(self.file_name_latences, 'w') as f:
-                    f.write(str(latency) + '\t')
+                print('Latency could not be calculated.')
         else:
-            print('Latency could not be calculated.')
+            score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
         # calculating of scores and saving of results
         x, gt, label, file_name, x_type = batch # unpacking of batch
         N_b = score_patches[np.argmax(score_patches[:,0])] # max of each patch
@@ -511,7 +541,7 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=32)
+    parser.add_argument('--batch_size', default=100)
     parser.add_argument('--load_size', default=64) 
     parser.add_argument('--input_size', default=64) # using same input size and load size for our data
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
@@ -527,13 +557,37 @@ def get_args():
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     args = get_args()
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
+    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
+    model.measure_latences = True
+    model.file_name_latences = 'latences.txt'
+    model.file_name_preparation_memory_bank = 'preparation_memory_bank.txt'
     if args.phase == 'train':
         trainer.fit(model)
         trainer.test(model)
     elif args.phase == 'test':
         trainer.test(model)
         
-    all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')
-    print(all_latencies)
+    all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
+    print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
+
+    preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank))
+    print(f'Preparation of Memory Bank: {round(preparation_memory_bank, 3)} ms')
+
+    # DONE
+    # annotations to code for better understanding (!)
+    # generate func for core process for better overview
+    # warm_up loop
+    # measurement loop
+    # different measurements for GPU and CPU 
+    # added args to model:
+        # - wether measurement should be done
+        # - file names for latences and memory bank
+    # latences and preparation duration for memory bank are written into csv file
+    # print of measurements in main part
+
+    # TODO
+    # determine final baseline
+    # batch-size
+    # different variants
+    # debug cpu runtime memory bank
