@@ -541,7 +541,7 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=100)
+    parser.add_argument('--batch_size', default=32)
     parser.add_argument('--load_size', default=64) 
     parser.add_argument('--input_size', default=64) # using same input size and load size for our data
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
@@ -559,7 +559,7 @@ if __name__ == '__main__':
     args = get_args()
     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
-    model.measure_latences = True
+    model.measure_latences = True # if not specified this is False
     model.file_name_latences = 'latences.txt'
     model.file_name_preparation_memory_bank = 'preparation_memory_bank.txt'
     if args.phase == 'train':
@@ -576,6 +576,7 @@ if __name__ == '__main__':
 
     # DONE
     # annotations to code for better understanding (!)
+    # changed order of some lines because some are not part of prediction process but of scoring process and therefore not relevant for run time
     # generate func for core process for better overview
     # warm_up loop
     # measurement loop
