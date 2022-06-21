@@ -449,7 +449,7 @@ class STPM(pl.LightningModule):
         '''
         a = int(args.load_size) # int, 64 
         anomaly_map_resized = cv2.resize(anomaly_map, (a, a)) # [8,8] --> [64,64]
-        anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4) # blurr in resized anomaly map; WHY?
+        anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4) # blurr in resized anomaly map; WHY? for better visualization
         # output // end
         return score_patches, anomaly_map_resized_blur
     
@@ -541,7 +541,7 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=32)
+    parser.add_argument('--batch_size', default=32) # just for train; for test always 1 l.351
     parser.add_argument('--load_size', default=64) 
     parser.add_argument('--input_size', default=64) # using same input size and load size for our data
     parser.add_argument('--coreset_sampling_ratio', default=0.01)
@@ -551,6 +551,7 @@ def get_args():
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
     parser.add_argument('--pre_weight', default='imagenet')
+    # editable
     args = parser.parse_args()
     return args
 
@@ -589,6 +590,7 @@ if __name__ == '__main__':
 
     # TODO
     # determine final baseline
-    # batch-size
+    # batch-size --> try different batch sizes!
     # different variants
     # debug cpu runtime memory bank
+    # 
