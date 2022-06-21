@@ -378,13 +378,20 @@ class STPM(pl.LightningModule):
             run_time = 0.0
             warm_up = 100
             reps = 5
-            for _ in warm_up:
+            validate_measure = True
+            if self.accelerator.__contains__('cpu'):
+                validate_measure = False
+            if validate_measure:
+                run_time_validate = 0.0
+            for _ in range(warm_up):
                 _, _, _, = prep_dirs(args.project_root_path)
                 _ = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
-            for _ in reps:
+            for _ in range(reps):
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
+                    if validate_measure:
+                        st = time.perf_counter() # for validation
                 elif self.accelerator.__contains__("cpu"):
                     st = time.perf_counter() # for devices not having cuda device
                 else:
@@ -400,13 +407,24 @@ class STPM(pl.LightningModule):
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     ender.record()
                     torch.cuda.synchronize()
-                    run_time = starter.elapsed_time(ender)
+                    this_run_time = starter.elapsed_time(ender)
+                    if validate_measure:
+                        et = time.perf_counter()
+                        this_run_time_validate = float((et - st)*1e3)
                 elif self.accelerator.__contains__("cpu"):
                     et = time.perf_counter()
                     this_run_time = float((et - st)*1e3)
-                    run_time += this_run_time
+                run_time += this_run_time
+                if validate_measure:
+                    run_time_validate += this_run_time_validate
+                
             with open(self.file_name_preparation_memory_bank, 'w') as f:
                 f.write(str(float(run_time / reps))) # mean
+                
+            if validate_measure:
+                with open(self.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt', 'w') as f2:
+                    f2.write(str(float(run_time_validate / reps))) # mean
+                
         else:
             self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
@@ -480,23 +498,32 @@ class STPM(pl.LightningModule):
         
         if self.measure_latences:
             # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
-            warm_up = 500 # specify how often file should be processed before actual measurment
+            validate_cuda_measure = True
+            if self.accelerator.__contains__('cpu'):
+                validate_cuda_measure = False # cause this makes only sense with accelerator gpu
+            warm_up = 200 # specify how often file should be processed before actual measurment
             reps = 10 # repititions for more meaningful measurements due to averaging
             run_times = [] # initialize timer
+            run_times_validate = []
             # self.file_name_latences = 'latences.txt'
             # warm_up
-            for run in range(warm_up):
+            for _ in range(warm_up):
                 _, _ = self.prediction_process_core(batch, batch_idx)
             # measurement
-            for rep in range(reps):
+            for _ in range(reps):
                 #start timer
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
+                    if validate_cuda_measure:
+                        st = time.perf_counter()
                 elif self.accelerator.__contains__("cpu") :
                     st = time.perf_counter() # for devices not having a cuda device
                 score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                    if validate_cuda_measure:
+                        et = time.perf_counter()
+                        run_times_validate += [float((et - st)*1e3)]     
                     ender.record() #end
                     torch.cuda.synchronize() # wait for gpu sync
                     run_times += [starter.elapsed_time(ender)] # in ms, run time of process
@@ -505,6 +532,15 @@ class STPM(pl.LightningModule):
                     run_times += [float((et - st)*1e3)]
             assert len(run_times) == reps, "Something went wrong!"
             latency = float(sum(run_times) / len(run_times)) # mean
+            if validate_cuda_measure:
+                latency_validate = float(sum(run_times_validate) / len(run_times_validate)) # mean
+                if not math.isnan(latency_validate):
+                    if os.path.exists(self.file_name_latences.split('.')[0] + '_validation.txt'):
+                        with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'a') as f:
+                            f.write(str(latency_validate) + '\t')
+                    else:
+                        with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'w') as f:
+                            f.write(str(latency_validate) + '\t')
             if not math.isnan(latency):
                 if os.path.exists(self.file_name_latences):
                     with open(self.file_name_latences, 'a') as f:
@@ -589,8 +625,8 @@ if __name__ == '__main__':
     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
     model.measure_latences = True # if not specified this is False
-    model.file_name_latences = 'latences_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_2.txt'
-    model.file_name_preparation_memory_bank = 'preparation_memory_bank_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_2.txt'
+    model.file_name_latences = 'latences_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_final_measure.txt'
+    model.file_name_preparation_memory_bank = 'preparation_memory_bank_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_final_measure.txt'
     model.accelerator = accelerator
     if args.phase == 'train':
         trainer.fit(model)
@@ -600,10 +636,15 @@ if __name__ == '__main__':
         
     all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
     print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
+    
+    # all_latencies_validate = genfromtxt(model.file_name_latences.split('.')[0] + '_validation.txt', delimiter='\t')[:-1]
+    # print(f'Average Latency Validation: {round(sum(all_latencies_validate)/len(all_latencies_validate), 3)} ms')
 
     preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank))
     print(f'Preparation of Memory Bank: {round(preparation_memory_bank, 3)} ms')
 
+    # preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt'))
+    # print(f'Preparation of Memory Bank Validation: {round(preparation_memory_bank, 3)} ms')
     # DONE
     # annotations to code for better understanding (!)
     # changed order of some lines because some are not part of prediction process but of scoring process and therefore not relevant for run time
@@ -616,6 +657,7 @@ if __name__ == '__main__':
         # - file names for latences and memory bank
     # latences and preparation duration for memory bank are written into csv file
     # print of measurements in main part
+    # added arg 'accelerator' to compare runtime of cpu and gpu
 
     # TODO
     # determine final baseline
