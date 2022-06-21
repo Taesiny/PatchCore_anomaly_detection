@@ -18,6 +18,7 @@ import cv2
 import os
 import math
 import time
+from enum import Enum
 
 from PIL import Image
 from sklearn.metrics import roc_auc_score
@@ -33,6 +34,12 @@ from scipy.ndimage import gaussian_filter
 
 from numpy import genfromtxt
 
+class Acceler(Enum):
+    '''
+    lil enum for ensuring only valid accelerators are chosen.
+    '''
+    gpu = 1
+    cpu = 2
 
 def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
 
@@ -257,6 +264,7 @@ class STPM(pl.LightningModule):
 
         self.save_hyperparameters(hparams)
         self.measure_latences = False
+        self.accelerator = "gpu"
         self.file_name_latences = None
         self.file_name_preparation_memory_bank = None
 
@@ -367,31 +375,46 @@ class STPM(pl.LightningModule):
     
     def on_test_start(self):
         if self.measure_latences:
-            if torch.cuda.is_available():
-                starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
-                starter.record() # start
-            else:
-                st = time.process_time_ns() # for devices not having cuda device
-
-        self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
-        
-        self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
-        # if torch.cuda.is_available():
-        #     res = faiss.StandardGpuResources()
-        #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
-        self.init_results_list()
-        if self.measure_latences:
-            if torch.cuda.is_available():
-                ender.record()
-                run_time = starter.elapsed_time(ender)
-            else:
-                et = time.process_time_ns()
-                run_time = (et - st) / 1000
+            run_time = 0.0
+            warm_up = 100
+            reps = 5
+            for _ in warm_up:
+                _, _, _, = prep_dirs(args.project_root_path)
+                _ = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
+            for _ in reps:
+                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
+                    starter.record() # start
+                elif self.accelerator.__contains__("cpu"):
+                    st = time.perf_counter() # for devices not having cuda device
+                else:
+                    assert True, "Specified Accelerator not valid. Has to be \"cpu\" or \"gpu\"."
+                ### process start ###
+                self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
+                self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
+                # if torch.cuda.is_available():
+                #     res = faiss.StandardGpuResources()
+                #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
+                self.init_results_list()
+                ### process end ###
+                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                    ender.record()
+                    torch.cuda.synchronize()
+                    run_time = starter.elapsed_time(ender)
+                elif self.accelerator.__contains__("cpu"):
+                    et = time.perf_counter()
+                    this_run_time = float((et - st)*1e3)
+                    run_time += this_run_time
             with open(self.file_name_preparation_memory_bank, 'w') as f:
-                f.write(str(run_time))
-
-
-        
+                f.write(str(float(run_time / reps))) # mean
+        else:
+            self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
+            self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
+            # if torch.cuda.is_available():
+            #     res = faiss.StandardGpuResources()
+            #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
+            self.init_results_list()
+                    
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
         features = self(x)
@@ -456,8 +479,9 @@ class STPM(pl.LightningModule):
     def test_step(self, batch, batch_idx): # Nearest Neighbour Search
         
         if self.measure_latences:
-            warm_up = 100 # specify how often file should be processed before actual measurment
-            reps = 25 # repititions for more meaningful measurements due to averaging
+            # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
+            warm_up = 500 # specify how often file should be processed before actual measurment
+            reps = 10 # repititions for more meaningful measurements due to averaging
             run_times = [] # initialize timer
             # self.file_name_latences = 'latences.txt'
             # warm_up
@@ -466,18 +490,19 @@ class STPM(pl.LightningModule):
             # measurement
             for rep in range(reps):
                 #start timer
-                if torch.cuda.is_available():
+                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
-                else:
-                    st = time.process_time() # for devices not having a cuda device
+                elif self.accelerator.__contains__("cpu") :
+                    st = time.perf_counter() # for devices not having a cuda device
                 score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
-                if torch.cuda.is_available():
+                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     ender.record() #end
                     torch.cuda.synchronize() # wait for gpu sync
                     run_times += [starter.elapsed_time(ender)] # in ms, run time of process
-                else:
-                    run_times += [(time.process_time() - st)*1000]
+                elif self.accelerator.__contains__("cpu") :
+                    et = time.perf_counter()
+                    run_times += [float((et - st)*1e3)]
             assert len(run_times) == reps, "Something went wrong!"
             latency = float(sum(run_times) / len(run_times)) # mean
             if not math.isnan(latency):
@@ -551,18 +576,22 @@ def get_args():
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
     parser.add_argument('--pre_weight', default='imagenet')
+    parser.add_argument('--accelerator', default=None)
+    parser.add_argument('--devices', default=None)
     # editable
     args = parser.parse_args()
     return args
 
 if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
+    accelerator = Acceler(2).name # choose 1 for gpu, 2 for cpu
     args = get_args()
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, gpus=0) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
+    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
     model.measure_latences = True # if not specified this is False
-    model.file_name_latences = 'latences.txt'
-    model.file_name_preparation_memory_bank = 'preparation_memory_bank.txt'
+    model.file_name_latences = 'latences_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_2.txt'
+    model.file_name_preparation_memory_bank = 'preparation_memory_bank_2106_initial_batch_1_KNN_Subsampling_1_percentage_cpu_2.txt'
+    model.accelerator = accelerator
     if args.phase == 'train':
         trainer.fit(model)
         trainer.test(model)
