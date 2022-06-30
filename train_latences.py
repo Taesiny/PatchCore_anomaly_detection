@@ -11,6 +11,7 @@ from torchvision import transforms
 import pytorch_lightning as pl
 from PIL import Image
 import numpy as np
+import pandas as pd
 import argparse
 import shutil
 import faiss
@@ -492,6 +493,70 @@ class STPM(pl.LightningModule):
             anomaly_map_resized_blur = [gaussian_filter(this_anomaly_map_resized, sigma=4) for this_anomaly_map_resized in anomaly_map_resized]
            
         return score_patches, anomaly_map_resized_blur
+
+    def prediction_process_core_piecwise_measuremet(self, batch, batch_idx):
+        '''
+        Extracted core process of prediction for better readability.
+        '''
+        t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        # input // start
+        ######################################################################################################################################################
+        # pass data through CNN // feature extraction
+        t_0_cpu = time.perf_counter() 
+        t_0_gpu.record()
+        x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
+        # extract embedding        
+        features = self(x)
+        ######################################################################################################################################################
+        # embedding of features
+        t_1_cpu = time.perf_counter() 
+        t_1_gpu.record()
+        torch.cuda.synchronize()
+        embeddings = []
+        for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
+            m = torch.nn.AvgPool2d(3, 1, 1) # define avg Pooling filter
+            embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
+        embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        if x.size()[0] <= 1:
+            embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
+        ######################################################################################################################################################
+            # comparison with memory bank
+            t_2_cpu = time.perf_counter() 
+            t_2_gpu.record()
+            torch.cuda.synchronize()
+            score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied
+        ######################################################################################################################################################
+            # create anomaly map
+            t_3_cpu = time.perf_counter() 
+            t_3_gpu.record()
+            torch.cuda.synchronize()
+            anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
+            a = int(args.load_size) # int, 64 
+            anomaly_map_resized = cv2.resize(anomaly_map, (a, a)) # [8,8] --> [64,64]
+            anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)# shape [8,8]
+        else:
+        ######################################################################################################################################################
+            # comparison with memory bank
+            t_2_cpu = time.perf_counter() 
+            t_2_gpu.record()
+            torch.cuda.synchronize()
+            embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
+        ######################################################################################################################################################
+            # create anomaly map
+            t_3_cpu = time.perf_counter() 
+            t_3_gpu.record() 
+            torch.cuda.synchronize()
+            score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
+            anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
+            a = int(args.load_size)
+            anomaly_map_resized = [cv2.resize(this_anomaly_map, (a, a)) for this_anomaly_map in anomaly_map]
+            anomaly_map_resized_blur = [gaussian_filter(this_anomaly_map_resized, sigma=4) for this_anomaly_map_resized in anomaly_map_resized]
+        ###################################################################################################################################################### 
+        # end
+        t_4_cpu = time.perf_counter() 
+        t_4_gpu.record()
+        torch.cuda.synchronize()
+        return score_patches, anomaly_map_resized_blur, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu
     
     def eval_one_step_test(self, score_patches, anomaly_map_resized_blur, x, gt, label, file_name, x_type):
         '''
@@ -523,8 +588,22 @@ class STPM(pl.LightningModule):
             validate_cuda_measure = self.accelerator.__contains__('gpu') # cause this makes only sense with accelerator gpu
             warm_up = 250 # specify how often file should be processed before actual measurment
             reps = 50 # repititions for more meaningful measurements due to averaging
-            run_times = [] # initialize timer
-            run_times_validate = []
+            # run_times = [] # initialize timer
+            # run_times_validate = []
+            run_times = {
+                    '#1 feature extraction cpu': [],
+                    '#2 feature extraction gpu': [],
+                    '#3 embedding of features cpu': [],
+                    '#4 embedding of features gpu': [],
+                    '#5 search with memory bank cpu': [],
+                    '#6 search with memory bank gpu': [],
+                    '#7 anomaly map cpu': [],
+                    '#8 anomaly map gpu': [],
+                    '#9 sum cpu': [],
+                    '#10 sum gpu': [],
+                    '#11 whole process cpu': [],
+                    '#12 whole process gpu': []          
+                }
             # self.file_name_latences = 'latences.txt'
             # warm_up
             for _ in range(warm_up):
@@ -539,37 +618,57 @@ class STPM(pl.LightningModule):
                         st = time.perf_counter()
                 elif self.accelerator.__contains__("cpu") :
                     st = time.perf_counter() # for devices not having a cuda device
-                all_score_patches, all_anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
+                all_score_patches, all_anomaly_map_resized_blur, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = self.prediction_process_core_piecwise_measuremet(batch, batch_idx) # core process
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
                     if validate_cuda_measure:
                         et = time.perf_counter()
-                        run_times_validate += [float((et - st)*1e3)]     
+                        # run_times_validate += [float((et - st)*1e3)]     
                     ender.record() #end
                     torch.cuda.synchronize() # wait for gpu sync
-                    run_times += [starter.elapsed_time(ender)] # in ms, run time of process
-                elif self.accelerator.__contains__("cpu") :
+                    run_times['#1 feature extraction cpu'] += [float((t_1_cpu - t_0_cpu) * 1e3)]
+                    run_times['#2 feature extraction gpu'] += [t_0_gpu.elapsed_time(t_1_gpu)]
+                    run_times['#3 embedding of features cpu'] += [float((t_2_cpu - t_1_cpu) * 1e3)]
+                    run_times['#4 embedding of features gpu'] += [t_1_gpu.elapsed_time(t_2_gpu)]
+                    run_times['#5 search with memory bank cpu'] += [float((t_3_cpu - t_2_cpu) * 1e3)]
+                    run_times['#6 search with memory bank gpu'] += [t_2_gpu.elapsed_time(t_3_gpu)]
+                    run_times['#7 anomaly map cpu'] += [float((t_4_cpu - t_3_cpu) * 1e3)]
+                    run_times['#8 anomaly map gpu'] += [t_3_gpu.elapsed_time(t_4_gpu)]
+                    run_times['#9 sum cpu'] += [float((t_4_cpu - t_0_cpu) * 1e3)]
+                    run_times['#10 sum gpu'] += [t_0_gpu.elapsed_time(t_4_gpu)]
+                    run_times['#11 whole process cpu'] += [float((et - st)*1e3)]
+                    run_times['#12 whole process gpu'] += [starter.elapsed_time(ender)] # in ms, run time of process
+                elif self.accelerator.__contains__("cpu"):
                     et = time.perf_counter()
-                    run_times += [float((et - st)*1e3)]
-            assert len(run_times) == reps, "Something went wrong!"
-            latency = float((sum(run_times) / len(run_times)) / batch[0].size()[0]) # mean
+                    run_times['#11 whole process cpu'] += [float((et - st)*1e3)]
+            # assert len(run_times) == reps, "Something went wrong!"
+            for this_entry in run_times.items():
+                run_times[this_entry[0]] = float((sum(this_entry[1]) / len(this_entry[1])) / batch[0].size()[0]) # mean
             if validate_cuda_measure:
-                latency_validate = float((sum(run_times_validate) / len(run_times_validate)) / batch[0].size()[0]) # mean
-                if not math.isnan(latency_validate):
-                    if os.path.exists(self.file_name_latences.split('.')[0] + '_validation.txt'):
-                        with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'a') as f:
-                            f.write(str(latency_validate) + '\t')
-                    else:
-                        with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'w') as f:
-                            f.write(str(latency_validate) + '\t')
-            if not math.isnan(latency):
-                if os.path.exists(self.file_name_latences):
-                    with open(self.file_name_latences, 'a') as f:
-                        f.write(str(latency) + '\t')
-                else:
-                    with open(self.file_name_latences, 'w') as f:
-                        f.write(str(latency) + '\t')
+                print(run_times)
+            #     latency_validate = float((sum(run_times_validate) / len(run_times_validate)) / batch[0].size()[0]) # mean
+            #     if not math.isnan(latency_validate):
+            #         if os.path.exists(self.file_name_latences.split('.')[0] + '_validation.txt'):
+            #             with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'a') as f:
+            #                 f.write(str(latency_validate) + '\t')
+            #         else:
+            #             with open(self.file_name_latences.split('.')[0] + '_validation.txt', 'w') as f:
+            #                 f.write(str(latency_validate) + '\t')
+            # if not math.isnan(latency):
+            #     if os.path.exists(self.file_name_latences):
+            #         with open(self.file_name_latences, 'a') as f:
+            #             f.write(str(latency) + '\t')
+            #     else:
+            #         with open(self.file_name_latences, 'w') as f:
+            #             f.write(str(latency) + '\t')
+            pd_run_times = pd.DataFrame(run_times, index=[batch_idx])
+            if os.path.exists(self.file_name_latences):
+                pd_run_times_ = pd.read_csv(self.file_name_latences, index_col=0)
+                pd_run_times = pd.concat([pd_run_times_, pd_run_times], axis=0)
+                pd_run_times.to_csv(self.file_name_latences)
             else:
-                print('Latency could not be calculated.')
+                pd_run_times.to_csv(self.file_name_latences)    
+            # else:
+            #     print('Latency could not be calculated.')
         else:
             score_patches, anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
         # calculating of scores and saving of results
@@ -585,8 +684,6 @@ class STPM(pl.LightningModule):
             x, gt, label, file_name, x_type = batch
             self.eval_one_step_test(score_patches, anomaly_map_resized_blur, x, gt, label, file_name, x_type)
                 
-        
-
 
     def test_epoch_end(self, outputs):
         print("Total pixel-level auc-roc score :")
@@ -643,8 +740,8 @@ if __name__ == '__main__':
     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
     model.measure_latences = True # if not specified this is False
-    model.file_name_latences = 'latences_2106_initial_batch_1_KNN_Subsampling_1_percentage_batch12_gpu_measure.txt'
-    model.file_name_preparation_memory_bank = 'preparation_memory_bank_2106_initial_batch_1_KNN_Subsampling_1_percentage_batch12_gpu_measure.txt'
+    model.file_name_latences = 'test_latences1.csv'
+    model.file_name_preparation_memory_bank = 'test_memory_bank1.txt'
     model.accelerator = accelerator
     if args.phase == 'train':
         trainer.fit(model)
@@ -652,19 +749,19 @@ if __name__ == '__main__':
     elif args.phase == 'test':
         trainer.test(model)
         
-    all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
-    print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
+    # all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
+    # print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
     
-    if accelerator.__contains__('gpu'):
-        all_latencies_validate = genfromtxt(model.file_name_latences.split('.')[0] + '_validation.txt', delimiter='\t')[:-1]
-        print(f'Average Latency Validation: {round(sum(all_latencies_validate)/len(all_latencies_validate), 3)} ms')
+    # if accelerator.__contains__('gpu'):
+    #     all_latencies_validate = genfromtxt(model.file_name_latences.split('.')[0] + '_validation.txt', delimiter='\t')[:-1]
+    #     print(f'Average Latency Validation: {round(sum(all_latencies_validate)/len(all_latencies_validate), 3)} ms')
 
-    preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank))
-    print(f'Preparation of Memory Bank: {round(preparation_memory_bank, 3)} ms')
+    # preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank))
+    # print(f'Preparation of Memory Bank: {round(preparation_memory_bank, 3)} ms')
 
-    if accelerator.__contains__('gpu'):
-        preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt'))
-        print(f'Preparation of Memory Bank Validation: {round(preparation_memory_bank, 3)} ms')
+    # if accelerator.__contains__('gpu'):
+    #     preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt'))
+    #     print(f'Preparation of Memory Bank Validation: {round(preparation_memory_bank, 3)} ms')
     # DONE
     # annotations to code for better understanding (!)
     # changed order of some lines because some are not part of prediction process but of scoring process and therefore not relevant for run time
@@ -681,7 +778,10 @@ if __name__ == '__main__':
 
     # TODO
     # determine final baseline
-    # batch-size --> try different batch sizes!
+    # batch-size --> try different batch sizes! --> validate
     # different variants
     # debug cpu runtime memory bank
-    # 
+    # sample ratio testen
+    # portions of each step for latences
+    # Anaysis: input_size, sample_ratio, batch_size, k of nn search, patch_size/ stride of m Avg_pool stride = (2,2) maybe (3,3)? --> csv 
+    # faiss-gpu bei Zeit
