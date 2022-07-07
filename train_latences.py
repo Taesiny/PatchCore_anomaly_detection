@@ -379,7 +379,7 @@ class STPM(pl.LightningModule):
     def on_test_start(self):
         if self.measure_latences:
             run_time = 0.0
-            warm_up = 100
+            warm_up = 1
             reps = 5
             validate_cuda_measure = self.accelerator.__contains__('gpu')
             if validate_cuda_measure:
@@ -594,8 +594,8 @@ class STPM(pl.LightningModule):
         if self.measure_latences:
             # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
             validate_cuda_measure = self.accelerator.__contains__('gpu') # cause this makes only sense with accelerator gpu
-            warm_up = 250 # specify how often file should be processed before actual measurment
-            reps = 50 # repititions for more meaningful measurements due to averaging
+            warm_up = 10 # specify how often file should be processed before actual measurment
+            reps = 5 # repititions for more meaningful measurements due to averaging
             # run_times = [] # initialize timer
             # run_times_validate = []
             run_times = {
@@ -659,12 +659,12 @@ class STPM(pl.LightningModule):
             if validate_cuda_measure:
                 print(run_times)
             pd_run_times = pd.DataFrame(run_times, index=[batch_idx])
-            if os.path.exists(self.file_name_latences):
-                pd_run_times_ = pd.read_csv(self.file_name_latences, index_col=0)
+            if os.path.exists(os.path.join(os.path.dirname(__file__), "results","csv", self.file_name_latences)):
+                pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.file_name_latences), index_col=0)
                 pd_run_times = pd.concat([pd_run_times_, pd_run_times], axis=0)
-                pd_run_times.to_csv(self.file_name_latences)
+                pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results","csv", self.file_name_latences))
             else:
-                pd_run_times.to_csv(self.file_name_latences)    
+                pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results","csv",self.file_name_latences))    
         else:
             all_score_patches, all_anomaly_map_resized_blur = self.prediction_process_core(batch, batch_idx) # core process
         # calculating of scores and saving of results
@@ -733,6 +733,8 @@ def get_args():
 if __name__ == '__main__':
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
+    if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
+        os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
     args = get_args()
     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
@@ -778,7 +780,7 @@ if __name__ == '__main__':
     # batch-size --> try different batch sizes! --> validate
     # different variants
     # debug cpu runtime memory bank
-    # sample ratio testen
+    # sample ratio testenFwar
     # portions of each step for latences
     # Anaysis: input_size, sample_ratio, batch_size, k of nn search, patch_size/ stride of m Avg_pool stride = (2,2) maybe (3,3)? --> csv 
     # faiss-gpu bei Zeit
