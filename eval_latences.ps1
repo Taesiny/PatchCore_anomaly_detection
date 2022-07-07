@@ -14,7 +14,7 @@ py train_latences.py --batch_size 1 --load_size 32 --input_size 32 --file_name_l
 py train_latences.py --batch_size 1 --load_size 64 --input_size 64 --file_name_latences "input_load_64.csv"
 py train_latences.py --batch_size 1 --load_size 128 --input_size 128 --file_name_latences "input_load_128.csv"
 py train_latences.py --batch_size 1 --load_size 128 --input_size 256 --file_name_latences "input_load_256.csv"
-py train_latences.py --batch_size 1 --load_size 320 --input_size 320 --file_name_latences "input_load_320.csv"
+#py train_latences.py --batch_size 1 --load_size 320 --input_size 320 --file_name_latences "input_load_320.csv"
 py train_latences.py --batch_size 1 --coreset_sampling_ratio 0.01 --file_name_latences "coreset_sampling_rate_1_percent.csv"
 py train_latences.py --batch_size 1 --coreset_sampling_ratio 0.05 --file_name_latences "coreset_sampling_rate_5_percent.csv"
 py train_latences.py --batch_size 1 --coreset_sampling_ratio 0.1 --file_name_latences "coreset_sampling_rate_10_percent.csv"
