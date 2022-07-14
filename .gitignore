@@ -133,3 +133,7 @@ dmypy.json
 
 # test results
 /test
+
+# old stuff
+/old_stuff
+/results
