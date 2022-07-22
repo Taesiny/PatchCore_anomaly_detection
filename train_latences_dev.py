@@ -303,8 +303,6 @@ class STPM(pl.LightningModule):
                 else:
                   if t[0][9:] == name:
                     self.model.state_dict()[name].copy_(t[1])
-        
-
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -442,7 +440,28 @@ class STPM(pl.LightningModule):
             #     res = faiss.StandardGpuResources()
             #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
             self.init_results_list()
-                    
+            
+    def embedding_concat_frame(self, embeddings):
+        '''
+        framework for concatenate more than two features or less than two
+        '''
+        no_of_embeddings = len(embeddings)
+        if no_of_embeddings == int(1):
+            embeddings_result = embeddings[0]
+        elif no_of_embeddings == int(2):
+            embeddings_result = embedding_concat(embeddings[0], embeddings[1])
+        elif no_of_embeddings > int(2):
+            for k in range(no_of_embeddings - 1):
+                if k == int(0):
+                    embeddings_result = embedding_concat(embeddings[0], embeddings[1]) # default
+                    pass
+                else:
+                    if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                        embeddings_result = embedding_concat(embeddings_result.cuda(), embeddings[k+1])
+                    else:
+                        embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
+        return embeddings_result                
+            
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
         features = self(x)
@@ -450,7 +469,8 @@ class STPM(pl.LightningModule):
         for feature in features:
             m = self.pooling # using AvgPool2d to calculate local-aware features
             embeddings.append(m(feature))
-        embedding = embedding_concat(embeddings[0], embeddings[1])
+        # embedding = embedding_concat(embeddings[0], embeddings[1])
+        embedding = self.embedding_concat_frame(embeddings=embeddings)
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
 
     def training_epoch_end(self, outputs): 
@@ -486,7 +506,8 @@ class STPM(pl.LightningModule):
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
             m = self.pooling # define avg Pooling filter
             embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
-        embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
             # resulting_features = embedding_test.shape[0]
@@ -532,10 +553,11 @@ class STPM(pl.LightningModule):
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
             m = self.pooling # define avg Pooling filter
             embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
-        embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
-            resulting_features = embedding_test.shape[0]
+            resulting_features = (embedding_test.shape[0], embedding_test.shape[1]) 
         ######################################################################################################################################################
             # comparison with memory bank
             t_2_cpu = time.perf_counter() 
@@ -589,8 +611,9 @@ class STPM(pl.LightningModule):
         '''
         if x.dim() != 4:
             x, gt, label = x.unsqueeze(0), gt.unsqueeze(0), label.unsqueeze(0)
-        N_b = score_patches[np.argmax(score_patches[:,0])] # max of each patch
-        w = (1 - (np.max(np.exp(N_b))/np.sum(np.exp(N_b)))) # scaling factor in paper
+        N_b = score_patches[np.argmax(score_patches[:,0])].astype(np.longfloat) # max of each patch
+        N_b_exp = np.exp(N_b)
+        w = (1 - (np.max(N_b_exp[~np.isinf(N_b_exp)]))/np.sum(N_b_exp[~np.isinf(N_b_exp)])) # scaling factor in paper
         if math.isnan(w):  
             w = 1.0
         score = w*max(score_patches[:,0])
@@ -723,6 +746,7 @@ class STPM(pl.LightningModule):
             pd_run_times_ = pd.read_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.file_name_latences), index_col=0)
             pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
             pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
+            pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.file_name_latences))
         # thresholding
         # cal_confusion_matrix(self.gt_list_img_lvl, self.pred_list_img_lvl, img_path_list = self.img_path_list, thresh = 0.00097)
         # print()
@@ -738,7 +762,7 @@ def get_args():
     parser.add_argument('--batch_size', default=32, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[2,3,4], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
     parser.add_argument('--avgpool_stride', default=1, type=int)
@@ -768,7 +792,7 @@ if __name__ == '__main__':
     model.file_name_latences = args.__dict__['file_name_latences']
     model.file_name_preparation_memory_bank = args.__dict__['file_name_latences'].split('.')[0] + '_preparation_memory_bank.csv'
     model.accelerator = accelerator
-    model.feature_maps_selected = [1,2,3,4]
+    # model.feature_maps_selected = [2,3]
     if args.phase == 'train':
         trainer.fit(model)
         trainer.test(model)
