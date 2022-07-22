@@ -762,7 +762,7 @@ def get_args():
     parser.add_argument('--batch_size', default=32, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[2,3,4], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
     parser.add_argument('--avgpool_stride', default=1, type=int)
