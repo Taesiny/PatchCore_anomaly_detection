@@ -273,7 +273,7 @@ class STPM(pl.LightningModule):
         self.accelerator = "gpu"
         self.file_name_latences = None
         self.file_name_preparation_memory_bank = None
-        self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
+        # self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
         self.feature_maps_selected = args.feature_maps_selected
         
         self.init_features()
@@ -467,7 +467,7 @@ class STPM(pl.LightningModule):
         features = self(x)
         embeddings = []
         for feature in features:
-            m = self.pooling # using AvgPool2d to calculate local-aware features
+            m = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
             embeddings.append(m(feature))
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding = self.embedding_concat_frame(embeddings=embeddings)
@@ -493,7 +493,14 @@ class STPM(pl.LightningModule):
         # self.index = faiss.IndexFlatL2()s
         self.index.add(self.embedding_coreset) 
         faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
-
+    
+    def adaptive_pooling(self, feature):
+        if feature.shape[3] == 16:
+            m = nn.AvgPool2d(kernel_size = 3, stride = 2, padding = 1)
+        else:
+            m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
+        return m
+    
     def prediction_process_core(self, batch, batch_idx):
         '''
         Extracted core process of prediction for better readability.
@@ -504,7 +511,7 @@ class STPM(pl.LightningModule):
         features = self(x)
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            m = self.pooling # define avg Pooling filter
+            m = self.adaptive_pooling(feature) # define avg Pooling filter
             embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
@@ -551,7 +558,7 @@ class STPM(pl.LightningModule):
             torch.cuda.synchronize()
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            m = self.pooling # define avg Pooling filter
+            m = self.adaptive_pooling(feature) # define avg Pooling filter
             embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
@@ -699,7 +706,7 @@ class STPM(pl.LightningModule):
             run_times['input_size'] = args.__dict__['input_size']
             run_times['coreset_sampling_ratio'] = args.__dict__['coreset_sampling_ratio']
             run_times['n_neighbors'] = args.__dict__['n_neighbors']
-            run_times['patch_size'] = self.pooling.__str__()
+            run_times['patch_size'] = 'adaptive'
             run_times['resulting_features_spatial'] = resulting_features[0]
             run_times['resulting_features_depth'] = resulting_features[1]
             # if validate_cuda_measure:
@@ -767,11 +774,11 @@ def get_args():
     parser.add_argument('--batch_size', default=32, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[1,2,3,4], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
-    parser.add_argument('--avgpool_kernel', default=3, type=int)
-    parser.add_argument('--avgpool_stride', default=1, type=int)
-    parser.add_argument('--avgpool_padding', default=1, type=int)
+    # parser.add_argument('--avgpool_kernel', default=3, type=int)
+    # parser.add_argument('--avgpool_stride', default=1, type=int)
+    # parser.add_argument('--avgpool_padding', default=1, type=int)
     parser.add_argument('--project_root_path', default=r'./test') # location to save result
     parser.add_argument('--save_src_code', default=True) 
     parser.add_argument('--save_anomaly_map', default=True)
