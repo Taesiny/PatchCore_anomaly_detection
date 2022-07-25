@@ -389,7 +389,7 @@ class STPM(pl.LightningModule):
     def on_test_start(self):
         if self.measure_latences:
             run_time = 0.0
-            warm_up = 1
+            warm_up = 10
             reps = 5
             validate_cuda_measure = self.accelerator.__contains__('gpu')
             if validate_cuda_measure:
@@ -425,8 +425,8 @@ class STPM(pl.LightningModule):
                     this_run_time = float((et - st) * 1e3)
                 run_time += this_run_time
                 if validate_cuda_measure:
-                    run_time_validate += this_run_time_validate
-                
+                    run_time_validate += this_run_time_validate  
+            
             with open(self.file_name_preparation_memory_bank, 'w') as f:
                 f.write(str(float(run_time / reps))) # mean
                 
@@ -447,7 +447,7 @@ class STPM(pl.LightningModule):
         '''
         no_of_embeddings = len(embeddings)
         if no_of_embeddings == int(1):
-            embeddings_result = embeddings[0]
+            embeddings_result = embeddings[0].cpu()
         elif no_of_embeddings == int(2):
             embeddings_result = embedding_concat(embeddings[0], embeddings[1])
         elif no_of_embeddings > int(2):
@@ -583,7 +583,7 @@ class STPM(pl.LightningModule):
                 t_2_gpu.record()
                 torch.cuda.synchronize()
             embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
-            resulting_features = embedding_test[0].shape[0]
+            resulting_features = (embedding_test[0].shape[0], embedding_test[0].shape[1])
         ######################################################################################################################################################
             # create anomaly map
             t_3_cpu = time.perf_counter() 
@@ -613,7 +613,11 @@ class STPM(pl.LightningModule):
             x, gt, label = x.unsqueeze(0), gt.unsqueeze(0), label.unsqueeze(0)
         N_b = score_patches[np.argmax(score_patches[:,0])].astype(np.longfloat) # max of each patch
         N_b_exp = np.exp(N_b)
-        w = (1 - (np.max(N_b_exp[~np.isinf(N_b_exp)]))/np.sum(N_b_exp[~np.isinf(N_b_exp)])) # scaling factor in paper
+        N_b_exp = N_b_exp[~np.isinf(N_b_exp)]
+        if len(N_b_exp) > 0:
+            w = (1 - (np.max(N_b_exp))/np.sum(N_b_exp)) # scaling factor in paper
+        else:
+            w = np.nan
         if math.isnan(w):  
             w = 1.0
         score = w*max(score_patches[:,0])
@@ -634,7 +638,7 @@ class STPM(pl.LightningModule):
         if self.measure_latences:
             # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
             validate_cuda_measure = self.accelerator.__contains__('gpu') # cause this makes only sense with accelerator gpu
-            warm_up = 250 # specify how often file should be processed before actual measurment
+            warm_up = 50 # specify how often file should be processed before actual measurment
             reps = 100 # repititions for more meaningful measurements due to averaging
             # run_times = [] # initialize timer
             # run_times_validate = []
@@ -696,7 +700,8 @@ class STPM(pl.LightningModule):
             run_times['coreset_sampling_ratio'] = args.__dict__['coreset_sampling_ratio']
             run_times['n_neighbors'] = args.__dict__['n_neighbors']
             run_times['patch_size'] = self.pooling.__str__()
-            run_times['resulting_features'] = resulting_features
+            run_times['resulting_features_spatial'] = resulting_features[0]
+            run_times['resulting_features_depth'] = resulting_features[1]
             # if validate_cuda_measure:
                 # print(run_times)
             pd_run_times = pd.DataFrame(run_times, index=[batch_idx])
@@ -785,14 +790,15 @@ if __name__ == '__main__':
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
+    if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "temp")):
+        os.makedirs(os.path.join(os.path.dirname(__file__), "results","temp"))
     args = get_args()
     trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
     model = STPM(hparams=args)
     model.measure_latences = True # if not specified this is False
-    model.file_name_latences = args.__dict__['file_name_latences']
-    model.file_name_preparation_memory_bank = args.__dict__['file_name_latences'].split('.')[0] + '_preparation_memory_bank.csv'
+    model.file_name_latences = os.path.join(os.path.dirname(__file__), "results", "temp", args.__dict__['file_name_latences'])
+    model.file_name_preparation_memory_bank = os.path.join(os.path.dirname(__file__), "results", "temp", args.__dict__['file_name_latences'].split('.')[0] + '_preparation_memory_bank.csv')
     model.accelerator = accelerator
-    # model.feature_maps_selected = [2,3]
     if args.phase == 'train':
         trainer.fit(model)
         trainer.test(model)
