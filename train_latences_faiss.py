@@ -273,9 +273,8 @@ class STPM(pl.LightningModule):
         self.accelerator = "gpu"
         self.file_name_latences = None
         self.file_name_preparation_memory_bank = None
-        # self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
+        self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
         self.feature_maps_selected = args.feature_maps_selected
-        self.pooling_strategy = args.pooling_strategy
         
         self.init_features()
         def hook_t(module, input, output): # hook func for extracting feature maps
@@ -444,7 +443,7 @@ class STPM(pl.LightningModule):
             
     def embedding_concat_frame(self, embeddings):
         '''
-        framework for concatenating more than two features or less than two
+        framework for concatenate more than two features or less than two
         '''
         no_of_embeddings = len(embeddings)
         if no_of_embeddings == int(1):
@@ -468,8 +467,8 @@ class STPM(pl.LightningModule):
         features = self(x)
         embeddings = []
         for feature in features:
-            pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
-            embeddings.append(pooled_feature)
+            m = self.pooling # using AvgPool2d to calculate local-aware features
+            embeddings.append(m(feature))
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding = self.embedding_concat_frame(embeddings=embeddings)
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
@@ -490,84 +489,14 @@ class STPM(pl.LightningModule):
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
-        self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
+        nlist = 100
+        quantizer = faiss.IndexFlatL2(self.embedding_coreset.shape[1])
+        self.index = faiss.IndexIVFFlat(quantizer, self.embedding_coreset.shape[1], nlist)
+        # self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
         # self.index = faiss.IndexFlatL2()s
         self.index.add(self.embedding_coreset) 
         faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
-    
-    def adaptive_pooling(self, feature):
-        if self.pooling_strategy == '':
-            m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
-        
-        if self.pooling_strategy == '1':
-            # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.AvgPool2d(kernel_size = 3, stride = 2, padding = 1)
-            else:
-                m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
-        if self.pooling_strategy == '1.1':
-            # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.AvgPool2d(kernel_size = 7, stride = 3, padding = 1)
-            else:
-                m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
-        if self.pooling_strategy == '1.2':
-            # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.AvgPool2d(kernel_size = 7, stride = 3, padding = 1)
-            elif feature.shape[3] == 8:
-                m = nn.AvgPool3d(kernel_size = 3, stride = (1,2,2), padding = 1)
-            else:
-                m = nn.AvgPool3d(kernel_size = 3, stride = (2,1,1), padding = 1)
-        if self.pooling_strategy == '2':
-            # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.MaxPool2d(kernel_size = 5, stride = 2, padding = 1)
-            else:
-                m = nn.MaxPool2d(kernel_size = 5, stride = 1, padding = 1)
-        if self.pooling_strategy == '3':
-        # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.AvgPool2d(kernel_size = 5, stride = 2, padding = 1)
-            else:
-                m = nn.AvgPool2d(kernel_size = 5, stride = 1, padding = 1)
-        
-        if self.pooling_strategy == '4':
-        # layer 1 & 3
-            if feature.shape[3] == 16:
-                m = nn.MaxPool2d(kernel_size = 5, stride = 2, padding = 1)
-            else:
-                m = nn.MaxPool2d(kernel_size = 5, stride = 1, padding = 1)
-        if self.pooling_strategy == 'adapt_avg_4':
-            m = nn.AdaptiveAvgPool2d(4)
-        if self.pooling_strategy == 'adapt_avg_6':
-            m = nn.AdaptiveAvgPool2d(6)
-        if self.pooling_strategy == 'adapt_avg_8':
-            m = nn.AdaptiveAvgPool2d(8)    
-        if self.pooling_strategy == 'adapt_avg_10':
-            m = nn.AdaptiveAvgPool2d(10)
-        if self.pooling_strategy == 'adapt_avg_12':
-            m = nn.AdaptiveAvgPool2d(12)
-        if self.pooling_strategy == 'adapt_avg_14':
-            m = nn.AdaptiveAvgPool2d(14)
-        if self.pooling_strategy == 'adapt_avg_16':
-            m = nn.AdaptiveAvgPool2d(16)
-        if self.pooling_strategy == 'adapt_max_4':
-            m = nn.AdaptiveMaxPool2d(4)
-        if self.pooling_strategy == 'adapt_max_6':
-            m = nn.AdaptiveMaxPool2d(6)
-        if self.pooling_strategy == 'adapt_max_8':
-            m = nn.AdaptiveMaxPool2d(8)    
-        if self.pooling_strategy == 'adapt_max_10':
-            m = nn.AdaptiveMaxPool2d(10)
-        if self.pooling_strategy == 'adapt_max_12':
-            m = nn.AdaptiveMaxPool2d(12)
-        if self.pooling_strategy == 'adapt_max_14':
-            m = nn.AdaptiveMaxPool2d(14)
-        if self.pooling_strategy == 'adapt_max_16':
-            m = nn.AdaptiveMaxPool2d(16)
-        return m(feature)
-    
+
     def prediction_process_core(self, batch, batch_idx):
         '''
         Extracted core process of prediction for better readability.
@@ -578,8 +507,8 @@ class STPM(pl.LightningModule):
         features = self(x)
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
-            embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
+            m = self.pooling # define avg Pooling filter
+            embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
@@ -625,8 +554,8 @@ class STPM(pl.LightningModule):
             torch.cuda.synchronize()
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
-            embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
+            m = self.pooling # define avg Pooling filter
+            embeddings.append(m(feature)) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
@@ -773,7 +702,7 @@ class STPM(pl.LightningModule):
             run_times['input_size'] = args.__dict__['input_size']
             run_times['coreset_sampling_ratio'] = args.__dict__['coreset_sampling_ratio']
             run_times['n_neighbors'] = args.__dict__['n_neighbors']
-            run_times['patch_size'] = 'adaptive'
+            run_times['patch_size'] = self.pooling.__str__()
             run_times['resulting_features_spatial'] = resulting_features[0]
             run_times['resulting_features_depth'] = resulting_features[1]
             # if validate_cuda_measure:
@@ -841,12 +770,11 @@ def get_args():
     parser.add_argument('--batch_size', default=32, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[1,2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
-    parser.add_argument('--pooling_strategy', default='1.2', type = str)
-    # parser.add_argument('--avgpool_kernel', default=3, type=int)
-    # parser.add_argument('--avgpool_stride', default=1, type=int)
-    # parser.add_argument('--avgpool_padding', default=1, type=int)
+    parser.add_argument('--avgpool_kernel', default=3, type=int)
+    parser.add_argument('--avgpool_stride', default=1, type=int)
+    parser.add_argument('--avgpool_padding', default=1, type=int)
     parser.add_argument('--project_root_path', default=r'./test') # location to save result
     parser.add_argument('--save_src_code', default=True) 
     parser.add_argument('--save_anomaly_map', default=True)
