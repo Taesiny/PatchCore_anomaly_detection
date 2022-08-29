@@ -103,8 +103,6 @@ class KNN(NN): # K-Nearest-Neighbors, in practical not used ()
 
 
         return knn
-
-
 ################################## not used ############################################
 
 def copy_files(src, dst, ignores=[]):
@@ -281,7 +279,13 @@ class STPM(pl.LightningModule):
         def hook_t(module, input, output): # hook func for extracting feature maps
             self.features.append(output)
 
-        self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True) # load pretrained weight
+        # 
+        if args.backbone.__contains__('resnet'):
+            self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True) # load pretrained weight
+        elif args.backbone.__contains__('mobilenet'):
+            self.model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
+        else:
+            assert "No valid backbone"
 
         if args.pre_weight=='imagenet': # just use the imagenet weight
           print('Using Imagenet weight')
@@ -308,17 +312,18 @@ class STPM(pl.LightningModule):
         for param in self.model.parameters():
             param.requires_grad = False
 
-        if int(1) in self.feature_maps_selected:
-            self.model.layer1[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
-        if int(2) in self.feature_maps_selected:
-            self.model.layer2[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
-        if int(3) in self.feature_maps_selected:
-            self.model.layer3[-1].register_forward_hook(hook_t)
-        if int(4) in self.feature_maps_selected:
-            self.model.layer4[-1].register_forward_hook(hook_t)
-        # self.model.layer5[-1].register_forward_hook(hook_t)
-        # self.model.stage2[-1].register_forward_hook(hook_t)
-        # self.model.stage3[-1].register_forward_hook(hook_t)
+        if args.backbone.__contains__('resnet'):
+            if int(1) in self.feature_maps_selected:
+                self.model.layer1[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
+            if int(2) in self.feature_maps_selected:
+                self.model.layer2[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
+            if int(3) in self.feature_maps_selected:
+                self.model.layer3[-1].register_forward_hook(hook_t)
+            if int(4) in self.feature_maps_selected:
+                self.model.layer4[-1].register_forward_hook(hook_t)
+        elif args.backbone.__contains__('mobilenet'):
+            for element in self.feature_maps_selected:
+                self.model.features[element].register_forward_hook(hook_t)
         
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -773,9 +778,10 @@ class STPM(pl.LightningModule):
             run_times['input_size'] = args.__dict__['input_size']
             run_times['coreset_sampling_ratio'] = args.__dict__['coreset_sampling_ratio']
             run_times['n_neighbors'] = args.__dict__['n_neighbors']
-            run_times['patch_size'] = 'adaptive'
+            run_times['pooling_strategy'] = args.__dict__['pooling_strategy']
             run_times['resulting_features_spatial'] = resulting_features[0]
             run_times['resulting_features_depth'] = resulting_features[1]
+            run_times['backbone'] = args.__dict__['backbone']
             # if validate_cuda_measure:
                 # print(run_times)
             pd_run_times = pd.DataFrame(run_times, index=[batch_idx])
@@ -843,10 +849,11 @@ def get_args():
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
     parser.add_argument('--feature_maps_selected', default=[1,2,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
-    parser.add_argument('--pooling_strategy', default='1.2', type = str)
-    # parser.add_argument('--avgpool_kernel', default=3, type=int)
-    # parser.add_argument('--avgpool_stride', default=1, type=int)
-    # parser.add_argument('--avgpool_padding', default=1, type=int)
+    parser.add_argument('--pooling_strategy', default='', type = str)
+    parser.add_argument('--avgpool_kernel', default=3, type=int)
+    parser.add_argument('--avgpool_stride', default=1, type=int)
+    parser.add_argument('--avgpool_padding', default=1, type=int)
+    parser.add_argument('--backbone', default = 'resnet', type = str)
     parser.add_argument('--project_root_path', default=r'./test') # location to save result
     parser.add_argument('--save_src_code', default=True) 
     parser.add_argument('--save_anomaly_map', default=True)
