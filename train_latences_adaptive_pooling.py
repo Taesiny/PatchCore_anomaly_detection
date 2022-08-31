@@ -1,5 +1,4 @@
 from typing import Tuple
-from sklearn.random_projection import SparseRandomProjection
 from zmq import EVENT_CLOSE_FAILED
 from sampling_methods.kcenter_greedy import kCenterGreedy
 from torch.utils.data import Dataset, DataLoader
@@ -22,19 +21,12 @@ import os
 import math
 import time
 from enum import Enum
-
-from PIL import Image
-from sklearn.metrics import roc_auc_score
 from torch import nn
-import pytorch_lightning as pl
-from sklearn.metrics import confusion_matrix
 import pickle
-from sampling_methods.kcenter_greedy import kCenterGreedy
 from sampling_methods.kcenter_greedy_iden import kCenterGreedyIden
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
-from scipy.ndimage import gaussian_filter
-
+import umap
 from numpy import genfromtxt
 
 class Acceler(Enum):
@@ -267,6 +259,7 @@ class STPM(pl.LightningModule):
         super(STPM, self).__init__()
 
         self.save_hyperparameters(hparams)
+        self.dim_reducer = None
         self.measure_latences = False
         self.accelerator = "gpu"
         self.file_name_latences = None
@@ -476,27 +469,42 @@ class STPM(pl.LightningModule):
             pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
             embeddings.append(pooled_feature)
         # embedding = embedding_concat(embeddings[0], embeddings[1])
-        embedding = self.embedding_concat_frame(embeddings=embeddings)
+        embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
 
     def training_epoch_end(self, outputs): 
-        total_embeddings = np.array(self.embedding_list)
+        total_embeddings = np.array(self.embedding_list) # shape: (115712, 448)
+        ##### for dev #####
+        # import time
+        # with open(f'features_{int(time.time())}.npy', 'wb') as f:
+        #     np.save(f, total_embeddings)
+        ##### for dev #####
         # Random projection
         # self.randomprojector = SparseRandomProjection(n_components='auto', eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
+        # fit
+        if args.umap:
+            print('\Fitting UMAP ...')
+            shrinking_factor = args.shrinking_factor
+            self.dim_reducer = umap.UMAP(n_components=int(total_embeddings.shape[1]*shrinking_factor))
+            self.dim_reducer.fit(total_embeddings)
+            total_embeddings_red = self.dim_reducer.transform(total_embeddings)
+            print('Fitting Done!')
+        else:
+            total_embeddings_red = total_embeddings
+            
         self.randomprojector = SparseRandomProjection(n_components=120, eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
-        self.randomprojector.fit(total_embeddings)
+        self.randomprojector.fit(total_embeddings_red)
         # Coreset Subsampling
         # selector = kCenterGreedyIden(total_embeddings,0,0)
         selector = kCenterGreedy(total_embeddings,0,0)
         
-        selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings.shape[0]*float(args.coreset_sampling_ratio)))
-        self.embedding_coreset = total_embeddings[selected_idx]
+        selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings_red.shape[0]*float(args.coreset_sampling_ratio)))
+        self.embedding_coreset = total_embeddings_red[selected_idx]
         
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
         self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
-        # self.index = faiss.IndexFlatL2()s
         self.index.add(self.embedding_coreset) 
         faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
     
@@ -590,14 +598,23 @@ class STPM(pl.LightningModule):
         if x.size()[0] <= 1:
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
             # resulting_features = embedding_test.shape[0]
+            if args.umap:
+                embedding_ = self.dim_reducer.transform(embedding_)
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied     
             anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
             a = int(args.load_size) # int, 64 
             anomaly_map_resized = cv2.resize(anomaly_map, (a, a)) # [8,8] --> [64,64]
             anomaly_map_resized_blur = gaussian_filter(anomaly_map_resized, sigma=4)# shape [8,8]
         else:
-            embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
+            embedding_test = np.array([np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])])
             # resulting_features = embedding_test[0].shape[0]
+            if args.umap:
+                print('\nTransform Features started...')
+                temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
+                transformed_flatten = self.dim_reducer.transform(temp_flatten)
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
+                # embedding_test = [self.dim_reducer.transform(element) for element in embedding_test] # not working properly, extreme long inference time
+                print('... finished!')
             score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
             anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
             a = int(args.load_size)
@@ -611,7 +628,7 @@ class STPM(pl.LightningModule):
         Extracted core process of prediction for better readability.
         '''
         if torch.cuda.is_available():
-            t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            t_0_gpu, t_1_gpu, t_1_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         # input // start
         ######################################################################################################################################################
         # pass data through CNN // feature extraction
@@ -636,6 +653,18 @@ class STPM(pl.LightningModule):
         embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
+            t_1_1_cpu = None
+            if args.umap:
+                t_1_1_cpu = time.perf_counter()
+                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                    t_1_1_gpu.record()
+                    torch.cuda.synchronize()
+                print('\nTransform Features started...')
+                temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
+                transformed_flatten = self.dim_reducer.transform(temp_flatten)
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
+                # embedding_test = [self.dim_reducer.transform(element) for element in embedding_test] # not working properly, extreme long inference time
+                print('... finished!')
             resulting_features = (embedding_test.shape[0], embedding_test.shape[1]) 
         ######################################################################################################################################################
             # comparison with memory bank
@@ -657,11 +686,23 @@ class STPM(pl.LightningModule):
         else:
         ######################################################################################################################################################
             # comparison with memory bank
+            embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
+            t_1_1_cpu = None
+            if args.umap:
+                t_1_1_cpu = time.perf_counter()
+                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                    t_1_1_gpu.record()
+                    torch.cuda.synchronize()
+                    temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
+                    transformed_flatten = self.dim_reducer.transform(temp_flatten)
+                    embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
+                # flattened = np.reshape(embedding.swapaxes(1,3))
+                # embedding_ = self.dim_reducer.transform(embedding_)
             t_2_cpu = time.perf_counter() 
             if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                 t_2_gpu.record()
                 torch.cuda.synchronize()
-            embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
+            
             resulting_features = (embedding_test[0].shape[0], embedding_test[0].shape[1])
         ######################################################################################################################################################
             # create anomaly map
@@ -681,8 +722,8 @@ class STPM(pl.LightningModule):
             t_4_gpu.record()
             torch.cuda.synchronize()
         else:
-            t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = None, None, None, None, None
-        return score_patches, anomaly_map_resized_blur, resulting_features, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu
+            t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu, t_1_1_gpu = None, None, None, None, None, None
+        return score_patches, anomaly_map_resized_blur, resulting_features, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu, t_1_1_cpu, t_1_1_gpu
     
     def eval_one_step_test(self, score_patches, anomaly_map_resized_blur, x, gt, label, file_name, x_type):
         '''
@@ -717,8 +758,8 @@ class STPM(pl.LightningModule):
         if self.measure_latences:
             # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
             validate_cuda_measure = self.accelerator.__contains__('gpu') # cause this makes only sense with accelerator gpu
-            warm_up = 50 # specify how often file should be processed before actual measurment
-            reps = 100 # repititions for more meaningful measurements due to averaging
+            warm_up = 1 # specify how often file should be processed before actual measurment
+            reps = 3 # repititions for more meaningful measurements due to averaging
             # run_times = [] # initialize timer
             # run_times_validate = []
             run_times = {
@@ -746,7 +787,7 @@ class STPM(pl.LightningModule):
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
                 st = time.perf_counter() # for devices not having a cuda device
-                all_score_patches, all_anomaly_map_resized_blur, resulting_features, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu = self.prediction_process_core_piecwise_measuremet(batch, batch_idx) # core process
+                all_score_patches, all_anomaly_map_resized_blur, resulting_features, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu, t_1_1_cpu, t_1_1_gpu = self.prediction_process_core_piecwise_measuremet(batch, batch_idx) # core process
                 et = time.perf_counter()
                 if self.accelerator.__contains__("gpu") and torch.cuda.is_available(): # in case gpu is used
                     ender.record() #end
@@ -757,6 +798,7 @@ class STPM(pl.LightningModule):
                     run_times['#6 search with memory bank gpu'] += [t_2_gpu.elapsed_time(t_3_gpu)]
                     run_times['#8 anomaly map gpu'] += [t_3_gpu.elapsed_time(t_4_gpu)]
                     run_times['#10 sum gpu'] += [t_0_gpu.elapsed_time(t_4_gpu)]
+                    run_times['#14 dim reduction gpu'] += [t_1_1_gpu.elapsed_time(t_2_gpu)] 
                 else: # in case cpu is used
                     run_times['#12 whole process gpu'] += [0.0] # in ms, run time of process
                     run_times['#2 feature extraction gpu'] += [0.0]
@@ -764,12 +806,14 @@ class STPM(pl.LightningModule):
                     run_times['#6 search with memory bank gpu'] += [0.0]
                     run_times['#8 anomaly map gpu'] += [0.0]
                     run_times['#10 sum gpu'] += [0.0]
+                    run_times['#14 dim reduction gpu'] += [0.0]
                 run_times['#1 feature extraction cpu'] += [float((t_1_cpu - t_0_cpu) * 1e3)]
                 run_times['#3 embedding of features cpu'] += [float((t_2_cpu - t_1_cpu) * 1e3)]
                 run_times['#5 search with memory bank cpu'] += [float((t_3_cpu - t_2_cpu) * 1e3)]
                 run_times['#7 anomaly map cpu'] += [float((t_4_cpu - t_3_cpu) * 1e3)]
                 run_times['#9 sum cpu'] += [float((t_4_cpu - t_0_cpu) * 1e3)]
                 run_times['#11 whole process cpu'] += [float((et - st) * 1e3)]
+                run_times['#15 dim reduction cpu'] += [float((t_2_cpu - t_1_1_cpu) * 1e3)]
             assert len(run_times['#1 feature extraction cpu']) == reps, "Something went wrong!"
             for this_entry in run_times.items():
                 run_times[this_entry[0]] = float((sum(this_entry[1]) / len(this_entry[1])) / batch[0].size()[0]) # mean
@@ -844,10 +888,10 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1, type = int) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=32, type = int)
+    parser.add_argument('--batch_size', default=56, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[1,2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
     parser.add_argument('--pooling_strategy', default='', type = str)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
@@ -863,6 +907,8 @@ def get_args():
     parser.add_argument('--file_name_latences', default='latences.csv', type = str)
     parser.add_argument('--accelerator', default=None)
     parser.add_argument('--devices', default=None)
+    parser.add_argument('--umap', type=bool, default=True)
+    parser.add_argument('--shrinking_factor', type=float, default=0.25)
     # editable
     args = parser.parse_args()
     return args
