@@ -22,12 +22,18 @@ import math
 import time
 from enum import Enum
 from torch import nn
+from torch.optim import Adam
 import pickle
 from sampling_methods.kcenter_greedy_iden import kCenterGreedyIden
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
 import umap
 from numpy import genfromtxt
+from torch.utils.data import Dataset
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+from torch.utils import data
 
 class Acceler(Enum):
     '''
@@ -252,7 +258,211 @@ def cal_confusion_matrix(y_true, y_pred_no_thresh, thresh, img_path_list):
     print(false_p)
     print('false negative')
     print(false_n)
+
+
+################################### UMAP MAPPER ################################################ 
+# Feed-Forward-NN that learns mapping found by UMAP for fast dim reduction while inference 
+################################### UMAP MAPPER ################################################
+class Umuap_nn(nn.Module):
+    def __init__(self, input_size, output_size):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, int(input_size*1.3)),
+            
+            nn.GELU(),
+            nn.BatchNorm1d(int(input_size*1.3)),
+            nn.Linear(int(input_size*1.3), int(input_size)),
+            nn.Dropout(p=0.4),
+            nn.GELU(),
+            nn.BatchNorm1d(int(input_size)),
+            nn.Linear(int(input_size), int(input_size*0.5)),
+            nn.Dropout(p=0.4),
+            nn.GELU(),
+            nn.BatchNorm1d(int(input_size*0.5)),
+            nn.Linear(int(input_size*0.5), output_size),
+        )        
+    def forward(self, x):
+        # x = self.af(self.fc1(x))
+        # x = self.b1(x)
+        # x = self.af(self.fc2(x))
+        # x = self.b2(x)
+        # x = self.af(self.fc3(x))
+        # x = self.b3(x)
+        # x = self.af(self.fc4(x))
+        
+        return self.layers(x)
     
+class Umap_data(Dataset):
+    def __init__(self, embeddings, shrinking_factor):
+        # timestamp = "1661853100"
+        # with open(f'features_{timestamp}.npy', 'rb') as f:
+            # self.features = np.load(f)
+        self.features = embeddings
+        reducer = umap.UMAP(
+            n_components= int(embeddings.shape[1]*shrinking_factor)
+        )
+
+        self.targets = reducer.fit_transform(self.features)
+        # total_no_samples = embeddings.shape[0]
+        # val_idx = np.random.choice(np.arange(total_no_samples),size = int(total_no_samples*0.2), replace=False)
+        
+    def __len__(self):
+        return self.features.shape[0]
+    
+    def __getitem__(self, idx):
+        input = torch.Tensor(self.features[idx,...])
+        output = torch.Tensor(self.targets[idx,...])
+        return input, output
+    
+def train_epoch(model, dataloader, loss_function, optimizer, device = 'cuda'):
+    '''
+    train a single epoch
+    '''
+    # sum of loss is initialized
+    loss_sum = 0
+    model.to(device)
+    model.train()
+
+    # for every single batch training process is done
+    for (feature, target) in dataloader:
+        feature = feature.float()
+        target = target.float()
+        samples_in_batch = target.shape[0]
+        target_var = Variable(target).to(device) # .view((samples_in_batch, -1))
+        #labels_var = labels.to(device)
+        size_feature = feature.shape[1]
+        feature_var = Variable(feature).to(device) # .view((samples_in_batch, size_feature))
+        #images_var = images.to(device)
+        # print(f'shape: {feature_var.shape} & {target_var.shape}')
+
+        # Forward pass
+        outputs = model(feature_var)
+
+        # Backward and optimize
+        model.zero_grad()
+        optimizer.zero_grad()
+        loss = loss_function(outputs, target_var)
+        loss_sum += float(loss.item()) * target.size(0)/len(dataloader.dataset)
+
+        loss.backward()
+        optimizer.step()
+
+    return loss_sum, model.eval()
+
+def test_model(model, dataloader, loss_function, device = 'cuda'):
+    '''
+    validate/test a single epoch
+    '''
+    model.eval()
+    with torch.no_grad():
+        # sum of loss is initialized
+        val_loss_sum = 0
+
+        for (feature, target) in dataloader:
+
+            target_var = Variable(target.float()).to(device)
+            feature_var = Variable(feature.float()).to(device)
+
+            # Forward pass
+            outputs = model(feature_var)
+
+            loss = loss_function(outputs, target_var)
+            val_loss_sum += float(loss.item()) * target.size(0)/len(dataloader.dataset)
+
+        return val_loss_sum
+    
+def train(model, train_loader, val_loader, optimizer, loss_function, epochs, device = 'cuda'):
+    '''
+    main method for training models
+    '''
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+
+    improvement_counter = 0
+    best_val = 1.0
+    best_model = None
+    # training starts here
+    best_after = int(0)
+    print('training starts\n')
+    for epoch in range(1, epochs+1):
+        # train a single epoch
+        train_loss, temp_model = train_epoch(model=model, dataloader=train_loader, loss_function=loss_function, optimizer=optimizer, device=device)
+        # validate afterwards
+        metrics = test_model(model=model, dataloader=val_loader, loss_function=loss_function, device=device)
+        print(f'Epoch [{epoch}/{epochs}], Loss_train: {train_loss}, Loss_val: {metrics}')
+        if metrics < best_val:
+            best_val = metrics
+            improvement_counter = 0
+            best_after = epoch
+            best_model = temp_model
+            # torch.save(model.state_dict(), os.path.join(
+            #     'optim_results', path_state_dict + ".pth"))
+            # with open(os.path.join('optim_results', path_state_dict+".json"), 'w') as hyperparam_file:
+            #     hyperparam_file.write(json.dumps(hyperparameters))
+        else:
+            improvement_counter += 1
+
+        if improvement_counter >= 10:
+            epochs_done = epoch
+            break
+        # append scores of epoch to arrays for plotting
+        #loss_test_plot = np.append(loss_test_plot, val)
+        #loss_plot = np.append(loss_plot, train)
+
+    return best_val, best_after, epochs_done, best_model
+
+def test_model(model, dataloader, loss_function, device = 'cuda'):
+    '''
+    validate/test a single epoch
+    '''
+    model.eval()
+    with torch.no_grad():
+        # sum of loss is initialized
+        val_loss_sum = 0
+
+        for (feature, target) in dataloader:
+
+            target_var = Variable(target.float()).to(device)
+            feature_var = Variable(feature.float()).to(device)
+
+            # Forward pass
+            outputs = model(feature_var)
+
+            loss = loss_function(outputs, target_var)
+            val_loss_sum += float(loss.item()) * target.size(0)/len(dataloader.dataset)
+
+        return val_loss_sum
+    
+
+def get_nn_mapper(embeddings, shrinking_factor):
+    net = Umuap_nn(input_size=embeddings.shape[1], output_size=int(embeddings.shape[1]*shrinking_factor))
+    criterion = nn.MSELoss()
+    EPOCHS = 200
+    BATCH_SIZE = 16
+    optm = Adam(net.parameters(), lr = 0.001, weight_decay=0.01)
+    print('Fit UMAP ...')
+    complete_ds = Umap_data(embeddings=embeddings, shrinking_factor=shrinking_factor)
+    print('UMAP fitted, Data for Training Generated!')
+    lengths = [int(len(complete_ds)*0.8), len(complete_ds) - int(len(complete_ds)*0.8)]
+    train_ds, val_ds = torch.utils.data.random_split(complete_ds, lengths)
+    val_loader = data.DataLoader(
+        val_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True
+    )
+    train_loader = data.DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True
+    )
+    _,_,_, nn_mapper = train(model=net, train_loader=train_loader, val_loader=val_loader, loss_function=criterion, optimizer=optm, epochs=EPOCHS)
+    
+    return nn_mapper
+################################### UMAP MAPPER ################################################
+
+
 
 class STPM(pl.LightningModule):
     def __init__(self, hparams):
@@ -686,18 +896,18 @@ class STPM(pl.LightningModule):
         else:
         ######################################################################################################################################################
             # comparison with memory bank
-            embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
+            embedding_test = np.array([np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])])
             t_1_1_cpu = None
             if args.umap:
                 t_1_1_cpu = time.perf_counter()
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
+
                     temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                     transformed_flatten = self.dim_reducer.transform(temp_flatten)
                     embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
-                # flattened = np.reshape(embedding.swapaxes(1,3))
-                # embedding_ = self.dim_reducer.transform(embedding_)
+            # embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
             t_2_cpu = time.perf_counter() 
             if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                 t_2_gpu.record()
@@ -774,7 +984,9 @@ class STPM(pl.LightningModule):
                     '#9 sum cpu': [],
                     '#10 sum gpu': [],
                     '#11 whole process cpu': [],
-                    '#12 whole process gpu': []          
+                    '#12 whole process gpu': [],
+                    '#15 dim reduction cpu': [],
+                    '#14 dim reduction gpu': []          
                 }
             # self.file_name_latences = 'latences.txt'
             # warm_up
@@ -891,7 +1103,7 @@ def get_args():
     parser.add_argument('--batch_size', default=56, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
     parser.add_argument('--pooling_strategy', default='', type = str)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
