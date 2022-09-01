@@ -809,7 +809,7 @@ class STPM(pl.LightningModule):
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
             # resulting_features = embedding_test.shape[0]
             if args.umap:
-                embedding_ = self.dim_reducer.transform(embedding_)
+                embedding_test = self.dim_reducer.transform(embedding_test)
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied     
             anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
             a = int(args.load_size) # int, 64 
