@@ -389,7 +389,7 @@ def train(model, train_loader, val_loader, optimizer, loss_function, epochs, dev
         device = torch.device('cpu')
 
     improvement_counter = 0
-    best_val = 1.0
+    best_val = 10.0
     best_model = None
     # training starts here
     best_after = int(0)
@@ -412,7 +412,7 @@ def train(model, train_loader, val_loader, optimizer, loss_function, epochs, dev
         else:
             improvement_counter += 1
 
-        if improvement_counter >= 10:
+        if improvement_counter >= 18:
             epochs_done = epoch
             break
         # append scores of epoch to arrays for plotting
@@ -854,17 +854,17 @@ class STPM(pl.LightningModule):
                 # embedding_test = [self.dim_reducer.transform(element) for element in embedding_test] # not working properly, extreme long inference time
                 print('... finished!')
             elif args.umap_nn:
-                print('\nTransform Features started...')
+                # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                 transformed_flatten = self.nn_umap(torch.Tensor(temp_flatten).to('cuda')).cpu().numpy()
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
-                print('... finished!')
+                # print('... finished!')
             elif args.pca:
-                print('\nTransform Features started...')
+                # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                 transformed_flatten = self.pca_fitter.transform(temp_flatten)
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.pca_fitter.components_.shape[0]))
-                print('... finished!')
+                # print('... finished!')
             score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
             anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
             a = int(args.load_size)
@@ -921,21 +921,21 @@ class STPM(pl.LightningModule):
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
-                print('\nTransform Features started...')
+                # print('\nTransform Features started...')
                 # temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                 # transformed_flatten = self.nn_umap(torch.Tensor(temp_flatten).to('cuda'))
                 # embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
                 embedding_test = self.nn_umap(torch.Tensor(embedding_test).to('cuda')).cpu().numpy()
-                print('... finished!')
+                # print('... finished!')
             elif args.pca:
                 t_1_1_cpu = time.perf_counter()
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
-                print('\nTransform Features started...')
+                # print('\nTransform Features started...')
                 # embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
                 embedding_test = self.pca_fitter.transform(embedding_test)
-                print('... finished!')
+                # print('... finished!')
                 
             resulting_features = (embedding_test.shape[0], embedding_test.shape[1]) 
         ######################################################################################################################################################
@@ -975,21 +975,21 @@ class STPM(pl.LightningModule):
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
-                    print('\nTransform Features started...')
+                    # print('\nTransform Features started...')
                     temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                     transformed_flatten = self.nn_umap(torch.Tensor(temp_flatten).to('cuda')).cpu().numpy()
                     embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
-                    print('... finished!')
+                    # print('... finished!')
             elif args.pca:
                 t_1_1_cpu = time.perf_counter()
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
-                    print('\nTransform Features started...')
+                    # print('\nTransform Features started...')
                     temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                     transformed_flatten = self.pca_fitter.transform(temp_flatten)
                     embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.pca_fitter.components_.shape[0]))
-                    print('... finished!')
+                    # print('... finished!')
             # embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
             t_2_cpu = time.perf_counter() 
             if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):

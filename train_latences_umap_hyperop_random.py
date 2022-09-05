@@ -390,7 +390,7 @@ def train(model, train_loader, val_loader, optimizer, loss_function, epochs, dev
         device = torch.device('cpu')
 
     improvement_counter = 0
-    best_val = 1.7
+    best_val = 5.0
     best_model = None
     # training starts here
     best_after = int(0)
@@ -1238,7 +1238,7 @@ if __name__ == '__main__':
         'img_auc': [],
         'pixel_auc': []
     }
-    id = 'script_4'
+    id = f'id_{np.random.randint(1000,9999)}'
     for k in range(1000):
         args = get_args()
         args.__dict__['file_name_latences'] = f'umap_nn_run_{k}_{id}.csv'
@@ -1272,7 +1272,7 @@ if __name__ == '__main__':
             elif args.phase == 'test':
                 trainer.test(model)
         except:
-            summary_dict['img_auc'] += [traceback.print_exc()]
+            summary_dict['img_auc'] += ['error']
             summary_dict['pixel_auc'] += ['error']
             
             
