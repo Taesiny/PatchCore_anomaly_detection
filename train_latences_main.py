@@ -35,6 +35,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.utils import data
 from sklearn.decomposition import PCA
+from anomalib.models.components.sampling import k_center_greedy
 
 class Acceler(Enum):
     '''
@@ -691,8 +692,8 @@ class STPM(pl.LightningModule):
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
 
     def training_epoch_end(self, outputs): 
+        switch = 0
         total_embeddings = np.array(self.embedding_list) # shape: (115712, 448)
-        ##### for dev #####
         # import time
         # with open(f'features_{int(time.time())}.npy', 'wb') as f:
         #     np.save(f, total_embeddings)
@@ -725,16 +726,24 @@ class STPM(pl.LightningModule):
             total_embeddings_red = self.pca_fitter.transform(total_embeddings)
         else:
             total_embeddings_red = total_embeddings
+
+        if switch == 1:
+            self.randomprojector = SparseRandomProjection(n_components=120, eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
+            self.randomprojector.fit(total_embeddings_red)
+            # Coreset Subsampling
+            # selector = kCenterGreedyIden(total_embeddings,0,0)
+            selector = kCenterGreedy(total_embeddings,0,0)
             
-        self.randomprojector = SparseRandomProjection(n_components=120, eps=0.9) # 'auto' => Johnson-Lindenstrauss lemma
-        self.randomprojector.fit(total_embeddings_red)
-        # Coreset Subsampling
-        # selector = kCenterGreedyIden(total_embeddings,0,0)
-        selector = kCenterGreedy(total_embeddings,0,0)
-        
-        selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings_red.shape[0]*float(args.coreset_sampling_ratio)))
+            selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings_red.shape[0]*float(args.coreset_sampling_ratio)))
+        else:
+            total_embeddings_red = torch.Tensor(total_embeddings_red)
+            sampler = k_center_greedy.KCenterGreedy(embedding=total_embeddings_red, sampling_ratio=float(args.coreset_sampling_ratio))
+            selected_idx = sampler.select_coreset_idxs()
+            total_embeddings_red = total_embeddings_red.numpy()
+        with open(file=f'selected_idx_{int(time.time())}.txt', mode='w') as f:
+            f.write(str(selected_idx))
+
         self.embedding_coreset = total_embeddings_red[selected_idx]
-        
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
@@ -1206,7 +1215,7 @@ def get_args():
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
     parser.add_argument('--pre_weight', default='imagenet')
-    parser.add_argument('--file_name_latences', default='latences.csv', type = str)
+    parser.add_argument('--file_name_latences', default=f'latences_{int(time.time())}.csv', type = str)
     parser.add_argument('--accelerator', default=None)
     parser.add_argument('--devices', default=None)
     parser.add_argument('--umap', type=bool, default=False)
