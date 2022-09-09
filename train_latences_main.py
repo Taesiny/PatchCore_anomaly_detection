@@ -494,6 +494,9 @@ class STPM(pl.LightningModule):
         # 
         if args.backbone.__contains__('resnet'):
             self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True) # load pretrained weight
+            if args.pruning:
+                self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(args.feature_maps_selected))]))
+            
         elif args.backbone.__contains__('mobilenet'):
             self.model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
         else:
@@ -524,7 +527,7 @@ class STPM(pl.LightningModule):
         for param in self.model.parameters():
             param.requires_grad = False
 
-        if args.backbone.__contains__('resnet'):
+        if args.backbone.__contains__('resnet') and not args.pruning:
             if int(1) in self.feature_maps_selected:
                 self.model.layer1[-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
             if int(2) in self.feature_maps_selected:
@@ -533,6 +536,16 @@ class STPM(pl.LightningModule):
                 self.model.layer3[-1].register_forward_hook(hook_t)
             if int(4) in self.feature_maps_selected:
                 self.model.layer4[-1].register_forward_hook(hook_t)
+        if args.backbone.__contains__('resnet') and args.pruning:
+            if int(1) in self.feature_maps_selected:
+                list(self.model.children())[4][-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
+            if int(2) in self.feature_maps_selected:
+                list(self.model.children())[5][-1].register_forward_hook(hook_t) # using feature maps of layer 2&3
+            if int(3) in self.feature_maps_selected:
+                list(self.model.children())[6][-1].register_forward_hook(hook_t)
+            if int(4) in self.feature_maps_selected:
+                list(self.model.children())[7][-1].register_forward_hook(hook_t)
+            
         elif args.backbone.__contains__('mobilenet'):
             for element in self.feature_maps_selected:
                 self.model.features[element].register_forward_hook(hook_t)
@@ -1134,7 +1147,7 @@ class STPM(pl.LightningModule):
                     run_times['#6 search with memory bank gpu'] += [t_2_gpu.elapsed_time(t_3_gpu)]
                     run_times['#8 anomaly map gpu'] += [t_3_gpu.elapsed_time(t_4_gpu)]
                     run_times['#10 sum gpu'] += [t_0_gpu.elapsed_time(t_4_gpu)]
-                    if args.pca or args.umap or args.umap_nn:
+                    if args.pca or args.umap or args.umap_nn or args.rand_projection:
                         run_times['#14 dim reduction gpu'] += [t_1_1_gpu.elapsed_time(t_2_gpu)] 
                 else: # in case cpu is used
                     run_times['#12 whole process gpu'] += [0.0] # in ms, run time of process
@@ -1150,7 +1163,7 @@ class STPM(pl.LightningModule):
                 run_times['#7 anomaly map cpu'] += [float((t_4_cpu - t_3_cpu) * 1e3)]
                 run_times['#9 sum cpu'] += [float((t_4_cpu - t_0_cpu) * 1e3)]
                 run_times['#11 whole process cpu'] += [float((et - st) * 1e3)]
-                if args.pca or args.umap or args.umap_nn:
+                if args.pca or args.umap or args.umap_nn or args.rand_projection:
                     run_times['#15 dim reduction cpu'] += [float((t_2_cpu - t_1_1_cpu) * 1e3)]
             assert len(run_times['#1 feature extraction cpu']) == reps, "Something went wrong!"
             for this_entry in run_times.items():
@@ -1261,6 +1274,7 @@ def get_args():
     parser.add_argument('--pca_components', type=float, default=0.99)
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
+    parser.add_argument('--pruning', type=bool, default=False)
     # editable
     args = parser.parse_args()
     return args
