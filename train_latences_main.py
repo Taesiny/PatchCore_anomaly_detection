@@ -495,10 +495,11 @@ class STPM(pl.LightningModule):
         if args.backbone.__contains__('resnet'):
             self.model = torch.hub.load('pytorch/vision:v0.9.0', 'resnet18', pretrained=True) # load pretrained weight
             if args.pruning:
-                self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(args.feature_maps_selected))]))
-            
+                self.model = nn.Sequential(*(list(self.model.children())[0:int(4+max(args.feature_maps_selected))]))       
         elif args.backbone.__contains__('mobilenet'):
             self.model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
+        elif args.backbone.__contains__('efficientnet'):
+            self.model = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_efficientnet_b0', pretrained=True)
         else:
             assert "No valid backbone"
 
@@ -549,6 +550,9 @@ class STPM(pl.LightningModule):
         elif args.backbone.__contains__('mobilenet'):
             for element in self.feature_maps_selected:
                 self.model.features[element].register_forward_hook(hook_t)
+        elif args.backbone.__contains__('efficientnet'):
+            for element in self.feature_maps_selected:
+                list(self.model.children())[1][int(element - 1)].register_forward_hook(hook_t)
         
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -567,6 +571,9 @@ class STPM(pl.LightningModule):
                         transforms.ToTensor()])
 
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
+        
+        if args.half_precision:
+            self.model = self.model.half()
 
     def init_results_list(self):
         self.gt_list_px_lvl = []
@@ -695,7 +702,10 @@ class STPM(pl.LightningModule):
             
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
-        features = self(x)
+        if args.half_precision:
+            features = self(x.half())
+        else:
+            features = self(x)
         embeddings = []
         for feature in features:
             pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
@@ -850,7 +860,10 @@ class STPM(pl.LightningModule):
         # input // start
         x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
         # extract embedding
-        features = self(x)
+        if args.half_precision:
+            features = self(x.half())
+        else:
+            features = self(x)
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
             feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
@@ -924,7 +937,10 @@ class STPM(pl.LightningModule):
             torch.cuda.synchronize()
         x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
         # extract embedding        
-        features = self(x)
+        if args.half_precision:
+            features = self(x.half())
+        else:
+            features = self(x)
         ######################################################################################################################################################
         # embedding of features
         t_1_cpu = time.perf_counter()
@@ -1275,6 +1291,7 @@ def get_args():
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
     parser.add_argument('--pruning', type=bool, default=False)
+    parser.add_argument('--half_precision', type=bool, default=False)
     # editable
     args = parser.parse_args()
     return args
