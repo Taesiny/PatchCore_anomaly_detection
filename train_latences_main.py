@@ -500,6 +500,8 @@ class STPM(pl.LightningModule):
             self.model = torch.hub.load('pytorch/vision:v0.10.0', 'mobilenet_v2', pretrained=True)
         elif args.backbone.__contains__('efficientnet'):
             self.model = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_efficientnet_b0', pretrained=True)
+            if args.pruning:
+                self.model = nn.Sequential(*list(self.model.children())[0],*list(self.model.children())[1][0:int(max(args.feature_maps_selected) - 1)])
         else:
             assert "No valid backbone"
 
@@ -1275,7 +1277,7 @@ def get_args():
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
-    parser.add_argument('--pre_weight', default='imagenet')
+    parser.add_argument('--pre_weight', default='efficientnet')
     parser.add_argument('--file_name_latences', default=f'latences_{int(time.time())}.csv', type = str)
     parser.add_argument('--accelerator', default=None)
     parser.add_argument('--devices', default=None)
@@ -1290,7 +1292,7 @@ def get_args():
     parser.add_argument('--pca_components', type=float, default=0.99)
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
-    parser.add_argument('--pruning', type=bool, default=False)
+    parser.add_argument('--pruning', type=bool, default=True)
     parser.add_argument('--half_precision', type=bool, default=False)
     # editable
     args = parser.parse_args()
