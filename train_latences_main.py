@@ -1,3 +1,4 @@
+from multiprocessing import pool
 from typing import Tuple
 from zmq import EVENT_CLOSE_FAILED
 from sampling_methods.kcenter_greedy import kCenterGreedy
@@ -501,7 +502,7 @@ class STPM(pl.LightningModule):
         elif args.backbone.__contains__('efficientnet'):
             self.model = torch.hub.load('NVIDIA/DeepLearningExamples:torchhub', 'nvidia_efficientnet_b0', pretrained=True)
             if args.pruning:
-                self.model = nn.Sequential(*list(self.model.children())[0],*list(self.model.children())[1][0:int(max(args.feature_maps_selected) - 1)])
+                self.model = nn.Sequential(*list(self.model.children())[0],*list(self.model.children())[1][0:int(max(args.feature_maps_selected))])
         else:
             assert "No valid backbone"
 
@@ -552,9 +553,12 @@ class STPM(pl.LightningModule):
         elif args.backbone.__contains__('mobilenet'):
             for element in self.feature_maps_selected:
                 self.model.features[element].register_forward_hook(hook_t)
-        elif args.backbone.__contains__('efficientnet'):
+        elif args.backbone.__contains__('efficientnet') and not args.pruning:
             for element in self.feature_maps_selected:
                 list(self.model.children())[1][int(element - 1)].register_forward_hook(hook_t)
+        elif args.backbone.__contains__('efficientnet') and args.pruning:
+            for element in self.feature_maps_selected:
+                list(self.model.children())[int(2+element)].register_forward_hook(hook_t)
         
         self.criterion = torch.nn.MSELoss(reduction='sum')
 
@@ -611,6 +615,8 @@ class STPM(pl.LightningModule):
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', prop=args.propotion)
         train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=0) #, pin_memory=True)
+        if True:
+            self.train_loader_for_reduction = train_loader
         return train_loader
 
     def test_dataloader(self):
@@ -625,6 +631,31 @@ class STPM(pl.LightningModule):
         self.model.eval() # to stop running_var move (maybe not critical)
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         self.embedding_list = []
+        if args.partial_reduction: # edit
+            self.fit_reducer_for_specific_layers()
+    
+    def fit_reducer_for_specific_layers(self):
+        dl = self.train_loader_for_reduction
+        for k, batch in enumerate(dl):
+            x,_,_,_,_ = batch
+            if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                output = self(x.cuda())
+                if k==0:
+                    features_to_reduce = output[1].cpu().numpy()
+                else:
+                    features_to_reduce = np.concatenate((features_to_reduce, output[1].cpu().numpy()), axis=0)
+            else:
+                print(self(x.cpu()))
+        # features_to_reduce = np.array(features_to_reduce, dtype=np.float32)
+        print(features_to_reduce.shape)
+        # temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
+        features_to_reduce = np.swapaxes(features_to_reduce,1,3)
+        features_to_reduce = np.reshape(features_to_reduce, (features_to_reduce.shape[0]*(features_to_reduce.shape[2]**2),features_to_reduce.shape[3]))
+        print(features_to_reduce.shape)
+        self.partial_reducer = PCA(n_components=0.8).fit(features_to_reduce)
+        features_reduced = self.partial_reducer.transform(features_to_reduce)
+        print(features_reduced.shape)
+        # print(features_reduced.shape[4])
     
     def on_test_start(self):
         if self.measure_latences:
@@ -711,7 +742,11 @@ class STPM(pl.LightningModule):
         embeddings = []
         for feature in features:
             pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
-            embeddings.append(pooled_feature)
+            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+                org_shape = pooled_feature.shape
+                pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+                pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+            embeddings.append(pooled_feature.cpu())
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
@@ -853,6 +888,15 @@ class STPM(pl.LightningModule):
             m = nn.AdaptiveMaxPool2d(14)
         if self.pooling_strategy == 'adapt_max_16':
             m = nn.AdaptiveMaxPool2d(16)
+        if self.pooling_strategy == "eff_1":
+            if feature.shape[3] == 32:
+                m = nn.AvgPool2d(kernel_size = 9, stride = 3, padding = 0)
+            if feature.shape[3] == 16:
+                m = nn.AvgPool2d(kernel_size=3, padding = 1, stride = 2)
+            if feature.shape[3] == 8:
+                m = nn.AvgPool2d(kernel_size=3, padding = 1, stride = 1)
+                
+                
         return m(feature)
     
     def prediction_process_core(self, batch, batch_idx):
@@ -868,8 +912,13 @@ class STPM(pl.LightningModule):
             features = self(x)
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
-            embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
+            pooled_feature = self.adaptive_pooling(feature) # define avg Pooling filter
+            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+                org_shape = pooled_feature.shape
+                pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+                pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+            embeddings.append(pooled_feature.cpu())
+            # embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
@@ -951,8 +1000,17 @@ class STPM(pl.LightningModule):
             torch.cuda.synchronize()
         embeddings = []
         for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
-            embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
+            pooled_feature = self.adaptive_pooling(feature) # define avg Pooling filter
+            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+                org_shape = pooled_feature.shape
+                pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+                pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+            embeddings.append(pooled_feature.cpu())
+        # for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
+        #     feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
+        #     if feature_pooled.shape[1] >= 100:
+        #         feature_pooled = self.partial_reducer.transform(feature_pooled)
+            # embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
         # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         embedding_ = self.embedding_concat_frame(embeddings)
         if x.size()[0] <= 1:
@@ -1069,13 +1127,14 @@ class STPM(pl.LightningModule):
                 torch.cuda.synchronize()
             
             resulting_features = (embedding_test[0].shape[0], embedding_test[0].shape[1])
+            score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
         ######################################################################################################################################################
             # create anomaly map
             t_3_cpu = time.perf_counter() 
             if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                 t_3_gpu.record() 
                 torch.cuda.synchronize()
-            score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
+            # score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
             anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
             a = int(args.load_size)
             anomaly_map_resized = [cv2.resize(this_anomaly_map, (a, a)) for this_anomaly_map in anomaly_map]
@@ -1262,12 +1321,12 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1, type = int) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=56, type = int)
+    parser.add_argument('--batch_size', default=7, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[1,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
-    parser.add_argument('--pooling_strategy', default='', type = str)
+    parser.add_argument('--pooling_strategy', default='1.1', type = str)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
     parser.add_argument('--avgpool_stride', default=1, type=int)
     parser.add_argument('--avgpool_padding', default=1, type=int)
@@ -1277,7 +1336,7 @@ def get_args():
     parser.add_argument('--save_anomaly_map', default=True)
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
-    parser.add_argument('--pre_weight', default='efficientnet')
+    parser.add_argument('--pre_weight', default='imagenet')
     parser.add_argument('--file_name_latences', default=f'latences_{int(time.time())}.csv', type = str)
     parser.add_argument('--accelerator', default=None)
     parser.add_argument('--devices', default=None)
@@ -1294,6 +1353,7 @@ def get_args():
     parser.add_argument('--rand_proj_components', type=int, default=0)
     parser.add_argument('--pruning', type=bool, default=True)
     parser.add_argument('--half_precision', type=bool, default=False)
+    parser.add_argument('--partial_reduction', type=bool, default=False)
     # editable
     args = parser.parse_args()
     return args
