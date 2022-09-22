@@ -1325,6 +1325,7 @@ class STPM(pl.LightningModule):
             pd_results = pd.DataFrame({'img_auc': [img_auc]*pd_run_times_.shape[0], 'pixel_auc': [pixel_auc]*pd_run_times_.shape[0]})
             pd_run_times = pd.concat([pd_run_times_, pd_results], axis=1)
             pd_run_times.to_csv(os.path.join(os.path.dirname(__file__), "results", "csv",self.file_name_latences))
+            print(f'\n\nMEAN INFERENCE TIME: {pd_run_times["#11 whole process cpu"].mean()} ms\n')
         # thresholding
         # cal_confusion_matrix(self.gt_list_img_lvl, self.pred_list_img_lvl, img_path_list = self.img_path_list, thresh = 0.00097)
         # print()
@@ -1367,7 +1368,7 @@ def get_args():
     parser.add_argument('--target_depth', type=int, default=120)
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
-    parser.add_argument('--pruning', type=bool, default=True)
+    parser.add_argument('--pruning', type=bool, default=False)
     parser.add_argument('--half_precision', type=bool, default=False)
     parser.add_argument('--partial_reduction', type=bool, default=False)
     parser.add_argument('--truncated_svd', type=bool, default=False)
