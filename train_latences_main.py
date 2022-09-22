@@ -35,7 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.utils import data
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD, FastICA, IncrementalPCA, SparsePCA, KernelPCA
 from anomalib.models.components.sampling import k_center_greedy
 
 class Acceler(Enum):
@@ -782,14 +782,30 @@ class STPM(pl.LightningModule):
             self.nn_umap = get_nn_mapper(embeddings=total_embeddings, shrinking_factor=args.shrinking_factor).to('cuda') # adapt
             total_embeddings_red = self.nn_umap(torch.Tensor(total_embeddings).to('cuda')).cpu().detach().numpy() # adapt
         elif args.pca:
-            self.pca_fitter = PCA(n_components=args.pca_components).fit(total_embeddings)
-            total_embeddings_red = self.pca_fitter.transform(total_embeddings)
+            self.sklearn_fitter = PCA(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
         elif args.rand_projection:
             if args.rand_proj_components == 0:
                 self.rand_projector = SparseRandomProjection(n_components='auto', eps=0.9).fit(total_embeddings)
             else:
-                self.rand_projector = SparseRandomProjection(n_components=args.rand_proj_components, eps=0.9).fit(total_embeddings)
+                self.rand_projector = SparseRandomProjection(n_components=args.target_depth, eps=0.9).fit(total_embeddings)
+                #  TruncatedSVD, FastICA, IncrementalPCA, SparsePCA, KernelPCA
             total_embeddings_red = self.rand_projector.transform(total_embeddings)
+        elif args.truncated_svd:
+            self.sklearn_fitter = TruncatedSVD(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
+        elif args.fast_ica:
+            self.sklearn_fitter = FastICA(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
+        elif args.incremental_pca:
+            self.sklearn_fitter = IncrementalPCA(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
+        elif args.sparse_pca:
+            self.sklearn_fitter = SparsePCA(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
+        elif args.kernel_pca:
+            self.sklearn_fitter = KernelPCA(n_components=args.target_depth).fit(total_embeddings)
+            total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
         else:
             total_embeddings_red = total_embeddings
 
@@ -928,8 +944,8 @@ class STPM(pl.LightningModule):
                 embedding_test = self.dim_reducer.transform(embedding_test)
             elif args.umap_nn:
                 embedding_test = self.nn_umap(torch.Tensor(embedding_test).to('cuda')).cpu().numpy()
-            elif args.pca:
-                embedding_test = self.pca_fitter.transform(embedding_test)
+            elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
+                embedding_test = self.sklearn_fitter.transform(embedding_test)
             elif args.rand_projection:
                 embedding_test = self.rand_projector.transform(embedding_test).copy(order='c').astype('float32')
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied     
@@ -953,11 +969,11 @@ class STPM(pl.LightningModule):
                 transformed_flatten = self.nn_umap(torch.Tensor(temp_flatten).to('cuda')).cpu().numpy()
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
                 # print('... finished!')
-            elif args.pca:
+            elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                 # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
-                transformed_flatten = self.pca_fitter.transform(temp_flatten)
-                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.pca_fitter.components_.shape[0]))
+                transformed_flatten = self.sklearn_fitter.transform(temp_flatten)
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth))
                 # print('... finished!')
             elif args.rand_projection:
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
@@ -1039,14 +1055,14 @@ class STPM(pl.LightningModule):
                 # embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
                 embedding_test = self.nn_umap(torch.Tensor(embedding_test).to('cuda')).cpu().numpy()
                 # print('... finished!')
-            elif args.pca:
+            elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                 t_1_1_cpu = time.perf_counter()
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
                 # embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
-                embedding_test = self.pca_fitter.transform(embedding_test)
+                embedding_test = self.sklearn_fitter.transform(embedding_test)
                 # print('... finished!')
             elif args.rand_projection:
                 t_1_1_cpu = time.perf_counter()
@@ -1101,15 +1117,15 @@ class STPM(pl.LightningModule):
                 transformed_flatten = self.nn_umap(torch.Tensor(temp_flatten).to('cuda')).cpu().numpy()
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
                 # print('... finished!')
-            elif args.pca:
+            elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                 t_1_1_cpu = time.perf_counter()
                 if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
-                transformed_flatten = self.pca_fitter.transform(temp_flatten)
-                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.pca_fitter.components_.shape[0]))
+                transformed_flatten = self.sklearn_fitter.transform(temp_flatten)
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth))
                 # print('... finished!')
             # embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
             elif args.rand_projection:
@@ -1224,7 +1240,7 @@ class STPM(pl.LightningModule):
                     run_times['#6 search with memory bank gpu'] += [t_2_gpu.elapsed_time(t_3_gpu)]
                     run_times['#8 anomaly map gpu'] += [t_3_gpu.elapsed_time(t_4_gpu)]
                     run_times['#10 sum gpu'] += [t_0_gpu.elapsed_time(t_4_gpu)]
-                    if args.pca or args.umap or args.umap_nn or args.rand_projection:
+                    if args.pca or args.umap or args.umap_nn or args.rand_projection or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                         run_times['#14 dim reduction gpu'] += [t_1_1_gpu.elapsed_time(t_2_gpu)] 
                 else: # in case cpu is used
                     run_times['#12 whole process gpu'] += [0.0] # in ms, run time of process
@@ -1240,7 +1256,7 @@ class STPM(pl.LightningModule):
                 run_times['#7 anomaly map cpu'] += [float((t_4_cpu - t_3_cpu) * 1e3)]
                 run_times['#9 sum cpu'] += [float((t_4_cpu - t_0_cpu) * 1e3)]
                 run_times['#11 whole process cpu'] += [float((et - st) * 1e3)]
-                if args.pca or args.umap or args.umap_nn or args.rand_projection:
+                if args.pca or args.umap or args.umap_nn or args.rand_projection or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                     run_times['#15 dim reduction cpu'] += [float((t_2_cpu - t_1_1_cpu) * 1e3)]
             assert len(run_times['#1 feature extraction cpu']) == reps, "Something went wrong!"
             for this_entry in run_times.items():
@@ -1348,12 +1364,18 @@ def get_args():
     parser.add_argument('--shrinking_factor', type=float, default=0.25)
     parser.add_argument('--umap_nn', type=bool, default=False)
     parser.add_argument('--pca', type=bool, default=False)
-    parser.add_argument('--pca_components', type=float, default=0.99)
+    parser.add_argument('--target_depth', type=int, default=120)
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
     parser.add_argument('--pruning', type=bool, default=True)
     parser.add_argument('--half_precision', type=bool, default=False)
     parser.add_argument('--partial_reduction', type=bool, default=False)
+    parser.add_argument('--truncated_svd', type=bool, default=False)
+    parser.add_argument('--fast_ica', type=bool, default=False)
+    parser.add_argument('--incremental_pca', type=bool, default=False)
+    parser.add_argument('--sparse_pca', type=bool, default=False)
+    parser.add_argument('--kernel_pca', type=bool, default=False)
+    # TruncatedSVD, FastICA, IncrementalPCA, SparsePCA, KernelPCA
     # editable
     args = parser.parse_args()
     return args
