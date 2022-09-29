@@ -42,7 +42,7 @@ class Acceler(Enum):
     '''
     lil enum for ensuring only valid accelerators are chosen.
     '''
-    gpu = 1
+    cuda = 1
     cpu = 2
 
 def distance_matrix(x, y=None, p=2):  # pairwise distance of vectors
@@ -481,7 +481,7 @@ class STPM(pl.LightningModule):
         self.save_hyperparameters(hparams)
         self.dim_reducer = None
         self.measure_latences = False
-        self.accelerator = "gpu"
+        self.accelerator = "cuda"
         self.file_name_latences = None
         self.file_name_preparation_memory_bank = None
         # self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
@@ -579,7 +579,14 @@ class STPM(pl.LightningModule):
         self.inv_normalize = transforms.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.255], std=[1/0.229, 1/0.224, 1/0.255])
         
         if args.half_precision:
-            self.model = self.model.half()
+            self = self.half()
+        
+        if self.accelerator.__contains__("cpu") or not torch.cuda.is_available():
+            self = self.to("cpu")
+        else:
+            dev = torch.device("cuda")
+            self = self.to(dev)
+        
 
     def init_results_list(self):
         self.gt_list_px_lvl = []
@@ -628,6 +635,7 @@ class STPM(pl.LightningModule):
         return None
 
     def on_train_start(self):
+        self = self.to(self.accelerator)
         self.model.eval() # to stop running_var move (maybe not critical)
         self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)
         self.embedding_list = []
@@ -635,41 +643,53 @@ class STPM(pl.LightningModule):
             self.fit_reducer_for_specific_layers()
     
     def fit_reducer_for_specific_layers(self):
+        print('\nFITTING PARTIAL REDUCER\n')
         dl = self.train_loader_for_reduction
+        p = args.feature_map_to_reduce[0] # make int out of list
         for k, batch in enumerate(dl):
             x,_,_,_,_ = batch
-            if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+            if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
+                # self.cuda()
                 output = self(x.cuda())
                 if k==0:
-                    features_to_reduce = output[1].cpu().numpy()
+                    features_to_reduce = output[p].cpu().numpy()
                 else:
-                    features_to_reduce = np.concatenate((features_to_reduce, output[1].cpu().numpy()), axis=0)
+                    features_to_reduce = np.concatenate((features_to_reduce, output[p].cpu().numpy()), axis=0)
             else:
-                print(self(x.cpu()))
+                output = self(x.cpu())
+                if k==0:
+                    features_to_reduce = output[p].cpu().numpy()
+                else:
+                    features_to_reduce = np.concatenate((features_to_reduce, output[p].cpu().numpy()), axis=0)
+        
         # features_to_reduce = np.array(features_to_reduce, dtype=np.float32)
-        print(features_to_reduce.shape)
+        # print(features_to_reduce.shape)
         # temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
         features_to_reduce = np.swapaxes(features_to_reduce,1,3)
         features_to_reduce = np.reshape(features_to_reduce, (features_to_reduce.shape[0]*(features_to_reduce.shape[2]**2),features_to_reduce.shape[3]))
         print(features_to_reduce.shape)
+        #### edit ####
         self.partial_reducer = PCA(n_components=0.8).fit(features_to_reduce)
+        #### edit ####
         features_reduced = self.partial_reducer.transform(features_to_reduce)
         print(features_reduced.shape)
+        print('\nFITTING OF PARTIAL REDUCER DONE\n')
         # print(features_reduced.shape[4])
     
     def on_test_start(self):
+        self = self.to(self.accelerator)
         if self.measure_latences:
             run_time = 0.0
             warm_up = 10
             reps = 5
-            validate_cuda_measure = self.accelerator.__contains__('gpu')
+            validate_cuda_measure = self.accelerator.__contains__("cuda")
             if validate_cuda_measure:
                 run_time_validate = 0.0
             for _ in range(warm_up):
                 _, _, _, = prep_dirs(args.project_root_path)
                 _ = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
             for _ in range(reps):
-                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
                     st = time.perf_counter() # for validation
@@ -685,7 +705,7 @@ class STPM(pl.LightningModule):
                 #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
                 self.init_results_list()
                 ### process end ###
-                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
                     et = time.perf_counter()
                     this_run_time = float((et - st) * 1e3)
                     ender.record()
@@ -727,7 +747,7 @@ class STPM(pl.LightningModule):
                     embeddings_result = embedding_concat(embeddings[0], embeddings[1]) # default
                     pass
                 else:
-                    if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                    if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                         embeddings_result = embedding_concat(embeddings_result.cuda(), embeddings[k+1])
                     else:
                         embeddings_result = embedding_concat(embeddings_result, embeddings[k+1].cpu())
@@ -735,18 +755,21 @@ class STPM(pl.LightningModule):
             
     def training_step(self, batch, batch_idx): # save locally aware patch features
         x, _, _, file_name, _ = batch
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
+            x = x.cuda()
         if args.half_precision:
-            features = self(x.half())
-        else:
-            features = self(x)
+            x = x.half()
+        features = self(x)
         embeddings = []
-        for feature in features:
+        for k, feature in enumerate(features):
             pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
-            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+            if k in args.feature_map_to_reduce and args.partial_reduction:
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-            embeddings.append(pooled_feature.cpu())
+                if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                    pooled_feature = pooled_feature.to(self.accelerator)
+            embeddings.append(pooled_feature)
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
@@ -785,7 +808,7 @@ class STPM(pl.LightningModule):
             self.sklearn_fitter = PCA(n_components=args.target_depth).fit(total_embeddings)
             total_embeddings_red = self.sklearn_fitter.transform(total_embeddings)
         elif args.rand_projection:
-            if args.rand_proj_components == 0:
+            if args.rand_proj_components == -1:
                 self.rand_projector = SparseRandomProjection(n_components='auto', eps=0.9).fit(total_embeddings)
             else:
                 self.rand_projector = SparseRandomProjection(n_components=args.target_depth, eps=0.9).fit(total_embeddings)
@@ -847,6 +870,8 @@ class STPM(pl.LightningModule):
             # layer 1 & 3
             if feature.shape[3] == 16:
                 m = nn.AvgPool2d(kernel_size = 7, stride = 3, padding = 1)
+            elif feature.shape[3] == 8:
+                m = nn.AvgPool2d(kernel_size = 3, stride = 2, padding = 1)
             else:
                 m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
         if self.pooling_strategy == '1.2':
@@ -920,23 +945,42 @@ class STPM(pl.LightningModule):
         Extracted core process of prediction for better readability.
         '''
         # input // start
-        x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
-        # extract embedding
+        # x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
+        # # extract embedding
+        # if args.half_precision:
+        #     features = self(x.half())
+        # else:
+        #     features = self(x)
+        # embeddings = []
+        # for k, feature in enumerate(features): # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
+        #     pooled_feature = self.adaptive_pooling(feature) # define avg Pooling filter
+        #     if k in args.feature_map_to_reduce and args.partial_reduction:
+        #         org_shape = pooled_feature.shape
+        #         pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+        #         pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+        #     embeddings.append(pooled_feature.to(self.accelerator))
+        #     # embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
+        # # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
+        # embedding_ = self.embedding_concat_frame(embeddings)
+        x, _, _, file_name, _ = batch
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
+            x = x.cuda()
         if args.half_precision:
-            features = self(x.half())
-        else:
-            features = self(x)
+            x = x.half()
+        features = self(x)
         embeddings = []
-        for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
-            pooled_feature = self.adaptive_pooling(feature) # define avg Pooling filter
-            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+        for k, feature in enumerate(features):
+            pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+            if k in args.feature_map_to_reduce and args.partial_reduction:
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-            embeddings.append(pooled_feature.cpu())
-            # embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
-        # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
-        embedding_ = self.embedding_concat_frame(embeddings)
+                if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                    pooled_feature = pooled_feature.to(self.accelerator)
+            embeddings.append(pooled_feature)
+        # embedding = embedding_concat(embeddings[0], embeddings[1])
+        embedding_ = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
+
         if x.size()[0] <= 1:
             embedding_test = np.array(reshape_embedding(np.array(embedding_))) # reshape the features as 1-D vectors, save them as numpy ndarray, shape: [64,384] for batch_size = 1
             # resulting_features = embedding_test.shape[0]
@@ -973,7 +1017,7 @@ class STPM(pl.LightningModule):
                 # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                 transformed_flatten = self.sklearn_fitter.transform(temp_flatten)
-                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth))
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth)).astype('float32')
                 # print('... finished!')
             elif args.rand_projection:
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
@@ -999,29 +1043,32 @@ class STPM(pl.LightningModule):
         ######################################################################################################################################################
         # pass data through CNN // feature extraction
         t_0_cpu = time.perf_counter()
-        if torch.cuda.is_available() and self.accelerator.__contains__("gpu"): 
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda"): 
             t_0_gpu.record()
             torch.cuda.synchronize()
-        x, gt, label, file_name, x_type = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
-        # extract embedding        
+        x, _, _, _, _ = batch # x: feature/input; gt: mask for pixel wise classification ground truth 
+        # extract embedding
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
+            x = x.cuda()
         if args.half_precision:
-            features = self(x.half())
-        else:
-            features = self(x)
+            x = x.half()        
+        features = self(x)
         ######################################################################################################################################################
         # embedding of features
         t_1_cpu = time.perf_counter()
-        if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
             t_1_gpu.record()
             torch.cuda.synchronize()
         embeddings = []
-        for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
+        for k,feature in enumerate(features): # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
             pooled_feature = self.adaptive_pooling(feature) # define avg Pooling filter
-            if pooled_feature.shape[1] >= 100 and args.partial_reduction:
+            if k in args.feature_map_to_reduce and args.partial_reduction:
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-            embeddings.append(pooled_feature.cpu())
+                if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                    pooled_feature = pooled_feature.to(self.accelerator)
+            embeddings.append(pooled_feature)
         # for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
         #     feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
         #     if feature_pooled.shape[1] >= 100:
@@ -1034,7 +1081,7 @@ class STPM(pl.LightningModule):
             t_1_1_cpu = None
             if args.umap:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 print('\nTransform Features started...')
@@ -1046,7 +1093,7 @@ class STPM(pl.LightningModule):
                 print('... finished!')
             elif args.umap_nn:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
@@ -1057,7 +1104,7 @@ class STPM(pl.LightningModule):
                 # print('... finished!')
             elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
@@ -1066,7 +1113,7 @@ class STPM(pl.LightningModule):
                 # print('... finished!')
             elif args.rand_projection:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
@@ -1078,14 +1125,14 @@ class STPM(pl.LightningModule):
         ######################################################################################################################################################
             # comparison with memory bank
             t_2_cpu = time.perf_counter() 
-            if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+            if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                 t_2_gpu.record()
                 torch.cuda.synchronize()
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied
         ######################################################################################################################################################
             # create anomaly map
             t_3_cpu = time.perf_counter() 
-            if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+            if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                 t_3_gpu.record()
                 torch.cuda.synchronize()
             anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
@@ -1099,7 +1146,7 @@ class STPM(pl.LightningModule):
             t_1_1_cpu = None
             if args.umap:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 print('\nTransform Features started...')
@@ -1109,7 +1156,7 @@ class STPM(pl.LightningModule):
                 print('... finished!')
             elif args.umap_nn:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
@@ -1119,18 +1166,18 @@ class STPM(pl.LightningModule):
                 # print('... finished!')
             elif args.pca or args.truncated_svd or args.fast_ica or args.incremental_pca or args.sparse_pca or args.kernel_pca:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
                 transformed_flatten = self.sklearn_fitter.transform(temp_flatten)
-                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth))
+                embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], args.target_depth)).astype('float32')
                 # print('... finished!')
             # embedding_test = [np.array(reshape_embedding(np.array(embedding_[k,...].unsqueeze(0)))) for k in range(x.size()[0])]
             elif args.rand_projection:
                 t_1_1_cpu = time.perf_counter()
-                if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+                if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                     t_1_1_gpu.record()
                     torch.cuda.synchronize()
                 temp_flatten = np.reshape(embedding_test,(embedding_test.shape[0]*embedding_test.shape[1], embedding_test.shape[2]))
@@ -1138,7 +1185,7 @@ class STPM(pl.LightningModule):
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.rand_projector.n_components_)).copy(order='c').astype('float32')
             
             t_2_cpu = time.perf_counter() 
-            if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+            if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                 t_2_gpu.record()
                 torch.cuda.synchronize()
             
@@ -1147,7 +1194,7 @@ class STPM(pl.LightningModule):
         ######################################################################################################################################################
             # create anomaly map
             t_3_cpu = time.perf_counter() 
-            if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+            if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                 t_3_gpu.record() 
                 torch.cuda.synchronize()
             # score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
@@ -1158,7 +1205,7 @@ class STPM(pl.LightningModule):
         ###################################################################################################################################################### 
         # end
         t_4_cpu = time.perf_counter() 
-        if torch.cuda.is_available() and self.accelerator.__contains__("gpu"):
+        if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
             t_4_gpu.record()
             torch.cuda.synchronize()
         else:
@@ -1197,7 +1244,7 @@ class STPM(pl.LightningModule):
         
         if self.measure_latences:
             # print(f'CUDA AVAILABLE? {torch.cuda.is_available()}\n')
-            validate_cuda_measure = self.accelerator.__contains__('gpu') # cause this makes only sense with accelerator gpu
+            # cause this makes only sense with accelerator gpu
             warm_up = 10 # specify how often file should be processed before actual measurment
             reps = 50 # repititions for more meaningful measurements due to averaging
             # run_times = [] # initialize timer
@@ -1225,13 +1272,13 @@ class STPM(pl.LightningModule):
             # measurement
             for _ in range(reps):
                 #start timer
-                if self.accelerator.__contains__("gpu") and torch.cuda.is_available():
+                if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
                     starter.record() # start
                 st = time.perf_counter() # for devices not having a cuda device
                 all_score_patches, all_anomaly_map_resized_blur, resulting_features, t_0_cpu, t_1_cpu, t_2_cpu, t_3_cpu, t_4_cpu, t_0_gpu, t_1_gpu, t_2_gpu, t_3_gpu, t_4_gpu, t_1_1_cpu, t_1_1_gpu = self.prediction_process_core_piecwise_measuremet(batch, batch_idx) # core process
                 et = time.perf_counter()
-                if self.accelerator.__contains__("gpu") and torch.cuda.is_available(): # in case gpu is used
+                if self.accelerator.__contains__("cuda") and torch.cuda.is_available(): # in case gpu is used
                     ender.record() #end
                     torch.cuda.synchronize() # wait for gpu sync
                     run_times['#12 whole process gpu'] += [starter.elapsed_time(ender)] # in ms, run time of process
@@ -1341,7 +1388,7 @@ def get_args():
     parser.add_argument('--batch_size', default=7, type = int)
     parser.add_argument('--load_size', default=64, type = int) 
     parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[1,3], type=int, nargs='+')
+    parser.add_argument('--feature_maps_selected', default=[2,3], type=int, nargs='+')
     parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
     parser.add_argument('--pooling_strategy', default='1.1', type = str)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
@@ -1371,6 +1418,7 @@ def get_args():
     parser.add_argument('--pruning', type=bool, default=False)
     parser.add_argument('--half_precision', type=bool, default=False)
     parser.add_argument('--partial_reduction', type=bool, default=False)
+    parser.add_argument('--feature_map_to_reduce', type=int, nargs='+', default = []) # not the number of the layer! but the number in line (starting with 1). E.g.: if feature_maps_selcted == [1,3,5] and u want to decrease features of layer 5 --> feature_map_to_reduce = 2. Only one layer possible at the moment.
     parser.add_argument('--truncated_svd', type=bool, default=False)
     parser.add_argument('--fast_ica', type=bool, default=False)
     parser.add_argument('--incremental_pca', type=bool, default=False)
@@ -1404,14 +1452,14 @@ if __name__ == '__main__':
     # all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
     # print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
     
-    # if accelerator.__contains__('gpu'):
+    # if accelerator.__contains__("cuda"):
     #     all_latencies_validate = genfromtxt(model.file_name_latences.split('.')[0] + '_validation.txt', delimiter='\t')[:-1]
     #     print(f'Average Latency Validation: {round(sum(all_latencies_validate)/len(all_latencies_validate), 3)} ms')
 
     # preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank))
     # print(f'Preparation of Memory Bank: {round(preparation_memory_bank, 3)} ms')
 
-    # if accelerator.__contains__('gpu'):
+    # if accelerator.__contains__("cuda"):
     #     preparation_memory_bank = float(genfromtxt(model.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt'))
     #     print(f'Preparation of Memory Bank Validation: {round(preparation_memory_bank, 3)} ms')
     # DONE
