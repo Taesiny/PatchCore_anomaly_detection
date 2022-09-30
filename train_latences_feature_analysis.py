@@ -1445,14 +1445,14 @@ def get_args():
 
 if __name__ == '__main__':
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
-    remaining_layers = list(range(4))
+    remaining_layers = list(range(256))
     removed_layers = []
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "temp")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","temp"))
-    for k in range(256):
+    for k in range(255):
         args = get_args()
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
         model = STPM(hparams=args)
@@ -1475,7 +1475,7 @@ if __name__ == '__main__':
             str_raw = f.read()
         str_list = str_raw.split('\n')[:-1]
         str_divided = np.array([el.split(',') for el in str_list])
-        for k in range(4):
+        for k in range(len(remaining_layers)):
             str_divided[k,0] = int(str_divided[k,0].split('[')[1].split(']')[0])
         str_divided = str_divided.astype('float')
         pd_res = pd.DataFrame({"number of Layer": str_divided[:,0], "img_auc": str_divided[:,1], "pixel_auc": str_divided[:,2]}).sort_values("img_auc")
