@@ -644,6 +644,52 @@ class STPM(pl.LightningModule):
         if args.partial_reduction: # edit
             self.fit_reducer_for_specific_layers()
     
+    def update_index(self):
+        dl = self.train_loader_for_reduction
+        # p = args.feature_map_to_reduce[0] # make int out of list
+        # 
+        #     x,_,_,_,_ = batch
+        #     if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
+        #         # self.cuda()
+        #         output = self(x.cuda())
+        #         ###
+        #     else:
+        #         output = self(x.cpu())
+                ### 
+        for k, batch in enumerate(dl):
+            x, _, _, file_name, _ = batch
+            if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
+                x = x.cuda()
+            if args.half_precision:
+                x = x.half()
+            features = self(x)
+            embeddings = []
+            for k, feature in enumerate(features):
+                pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+                if k in args.feature_map_to_reduce and args.partial_reduction:
+                    org_shape = pooled_feature.shape
+                    pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+                    pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+                    if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                        pooled_feature = pooled_feature.to(self.accelerator)
+                pooled_feature = self.zero_out(pooled_feature=pooled_feature, vals_to_zero=self.vals_to_zero)
+                embeddings.append(pooled_feature)
+            # embedding = embedding_concat(embeddings[0], embeddings[1])
+            embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
+            self.embedding_list.extend(reshape_embedding(np.array(embedding)))
+        total_embeddings_red = np.array(self.embedding_list) 
+        total_embeddings_red = torch.Tensor(total_embeddings_red)
+        sampler = k_center_greedy.KCenterGreedy(embedding=total_embeddings_red, sampling_ratio=float(args.coreset_sampling_ratio))
+        selected_idx = sampler.select_coreset_idxs()
+        total_embeddings_red = total_embeddings_red.numpy()
+        self.embedding_coreset = total_embeddings_red[selected_idx]
+        # print('initial embedding size : ', total_embeddings.shape)
+        print('final embedding size : ', self.embedding_coreset.shape)
+        #faiss
+        self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
+        self.index.add(self.embedding_coreset) 
+        faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+        
     def fit_reducer_for_specific_layers(self):
         print('\nFITTING PARTIAL REDUCER\n')
         dl = self.train_loader_for_reduction
@@ -727,6 +773,7 @@ class STPM(pl.LightningModule):
                 with open(self.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt', 'w') as f2:
                     f2.write(str(float(run_time_validate / reps))) # mean  
         else:
+            self.update_index()
             self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
             self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
             # if torch.cuda.is_available():
@@ -970,6 +1017,7 @@ class STPM(pl.LightningModule):
         # # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         # embedding_ = self.embedding_concat_frame(embeddings)
         x, _, _, file_name, _ = batch
+        
         if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
             x = x.cuda()
         if args.half_precision:
@@ -1387,7 +1435,7 @@ class STPM(pl.LightningModule):
         # print()
         write_layer = [el for el in self.vals_to_zero if el not in self.removed_layers]
         write_str = f'{write_layer},{img_auc},{pixel_auc}\n'
-        with open(f'layer_3_resnet_with_removed_{self.removed_layers.__str__()}.txt', 'a+') as g:
+        with open(f'layer_3_resnet_with_removed_{self.removed_layers.__str__()}_2.txt', 'a+') as g:
             g.write(write_str)
         
         with open(args.project_root_path + r'/results.txt', 'a') as f:
@@ -1445,14 +1493,14 @@ def get_args():
 
 if __name__ == '__main__':
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
-    remaining_layers = list(range(256))
+    remaining_layers = list(range(4))
     removed_layers = []
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "temp")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","temp"))
-    for k in range(255):
+    for k in range(3):
         args = get_args()
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
         model = STPM(hparams=args)
@@ -1471,7 +1519,7 @@ if __name__ == '__main__':
             elif args.phase == 'test':
                 trainer.test(model)
                 
-        with open(f'layer_3_resnet_with_removed_{removed_layers.__str__()}.txt', 'r') as f:
+        with open(f'layer_3_resnet_with_removed_{removed_layers.__str__()}_2.txt', 'r') as f:
             str_raw = f.read()
         str_list = str_raw.split('\n')[:-1]
         str_divided = np.array([el.split(',') for el in str_list])
@@ -1479,7 +1527,7 @@ if __name__ == '__main__':
             str_divided[k,0] = int(str_divided[k,0].split('[')[1].split(']')[0])
         str_divided = str_divided.astype('float')
         pd_res = pd.DataFrame({"number of Layer": str_divided[:,0], "img_auc": str_divided[:,1], "pixel_auc": str_divided[:,2]}).sort_values("img_auc")
-        pd_res.to_csv(f'result_after_run_{k}_with_removed_layers_{removed_layers.__str__()}_resnet_layer_3.csv')
+        pd_res.to_csv(f'result_after_run_{k}_with_removed_layers_{removed_layers.__str__()}_resnet_layer_3_2.csv')
         layer_to_be_removed = int(pd_res.iloc[0][0])
         removed_layers += [layer_to_be_removed]
         remaining_layers = [el for el in remaining_layers if el not in removed_layers]
