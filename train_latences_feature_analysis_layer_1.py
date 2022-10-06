@@ -29,7 +29,7 @@ from sampling_methods.kcenter_greedy_iden import kCenterGreedyIden
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.neighbors import NearestNeighbors
 import umap
-from numpy import float16, genfromtxt
+from numpy import genfromtxt
 from torch.utils.data import Dataset
 import torch.nn as nn
 import torch.nn.functional as F
@@ -460,12 +460,14 @@ def get_nn_mapper(embeddings, shrinking_factor):
     val_loader = data.DataLoader(
         val_ds,
         batch_size=BATCH_SIZE,
-        shuffle=True
+        shuffle=True,
+        num_workers=12
     )
     train_loader = data.DataLoader(
         train_ds,
         batch_size=BATCH_SIZE,
-        shuffle=True
+        shuffle=True,
+        num_workers=12
     )
     _,_,_, nn_mapper = train(model=net, train_loader=train_loader, val_loader=val_loader, loss_function=criterion, optimizer=optm, epochs=EPOCHS)
     
@@ -484,6 +486,8 @@ class STPM(pl.LightningModule):
         self.accelerator = "cuda"
         self.file_name_latences = None
         self.file_name_preparation_memory_bank = None
+        self.removed_layers = []
+        self.vals_to_zero = None
         # self.pooling = nn.AvgPool2d(kernel_size = args.avgpool_kernel, stride = args.avgpool_stride, padding = args.avgpool_padding)
         self.feature_maps_selected = args.feature_maps_selected
         self.pooling_strategy = args.pooling_strategy
@@ -564,21 +568,13 @@ class STPM(pl.LightningModule):
 
         self.init_results_list()
         a = int(args.load_size)
-        if args.half_precision:
-            self.data_transforms = transforms.Compose([
-                            transforms.Resize((a, a), Image.ANTIALIAS),
-                            transforms.ToTensor(),
-                            transforms.ConvertImageDtype(dtype=torch.float16),
-                            # transforms.CenterCrop(args.input_size),
-                            transforms.Normalize(mean=mean_train,
-                                                std=std_train)]) # resize input image size + normalization
-        else:
-            self.data_transforms = transforms.Compose([
-                            transforms.Resize((a, a), Image.ANTIALIAS),
-                            transforms.ToTensor(),
-                            # transforms.CenterCrop(args.input_size),
-                            transforms.Normalize(mean=mean_train,
-                                                std=std_train)]) 
+        
+        self.data_transforms = transforms.Compose([
+                        transforms.Resize((a, a), Image.ANTIALIAS),
+                        transforms.ToTensor(),
+                        # transforms.CenterCrop(args.input_size),
+                        transforms.Normalize(mean=mean_train,
+                                            std=std_train)]) # resize input image size + normalization
         self.gt_transforms = transforms.Compose([
                         transforms.Resize((a, a)),
                         # transforms.CenterCrop(args.input_size),
@@ -629,14 +625,14 @@ class STPM(pl.LightningModule):
 
     def train_dataloader(self):
         image_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='train', prop=args.propotion)
-        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=0) #, pin_memory=True)
+        train_loader = DataLoader(image_datasets, batch_size=args.batch_size, shuffle=True, num_workers=12) #, pin_memory=True)
         if True:
             self.train_loader_for_reduction = train_loader
         return train_loader
 
     def test_dataloader(self):
         test_datasets = MVTecDataset(root=os.path.join(args.dataset_path,args.category), transform=self.data_transforms, gt_transform=self.gt_transforms, phase='test', prop=452)
-        test_loader = DataLoader(test_datasets, batch_size=args.batch_size, shuffle=False, num_workers=0) #, pin_memory=True) # only work on batch_size=1, now.
+        test_loader = DataLoader(test_datasets, batch_size=args.batch_size, shuffle=False, num_workers=12) #, pin_memory=True) # only work on batch_size=1, now.
         return test_loader
 
     def configure_optimizers(self):
@@ -650,6 +646,55 @@ class STPM(pl.LightningModule):
         if args.partial_reduction: # edit
             self.fit_reducer_for_specific_layers()
     
+    def update_index(self):
+        # dl = self.train_loader_for_reduction
+        # # p = args.feature_map_to_reduce[0] # make int out of list
+        
+        # x,_,_,_,_ = batch
+        # if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
+            # self.cuda()
+        #     output = self(x.cuda())
+        #     ###
+        # else:
+        #     output = self(x.cpu())
+        #     ## 
+        # for k, batch in enumerate(dl):
+        #     x, _, _, file_name, _ = batch
+        #     if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
+        #         x = x.cuda()
+        #     if args.half_precision:
+        #         x = x.half()
+        #     features = self(x)
+        #     embeddings = []
+        #     for k, feature in enumerate(features):
+        #         pooled_feature = self.adaptive_pooling(feature)# using AvgPool2d to calculate local-aware features
+        #         if k in args.feature_map_to_reduce and args.partial_reduction:
+        #             org_shape = pooled_feature.shape
+        #             pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
+        #             pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
+        #             if not pooled_feature.device.__str__().__contains__(self.accelerator):
+        #                 pooled_feature = pooled_feature.to(self.accelerator)
+        #         pooled_feature = self.zero_out(pooled_feature=pooled_feature, vals_to_zero=self.vals_to_zero)
+        #         embeddings.append(pooled_feature)
+        #     # embedding = embedding_concat(embeddings[0], embeddings[1])
+        #     embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
+        #     self.embedding_list.extend(reshape_embedding(np.array(embedding)))
+        # total_embeddings_red = np.array(self.embedding_list) 
+        # # total_embeddings_red = total_embeddings_red.numpy()
+        # with open('feature_set_resnet_layer_1.npy', 'wb') as f:
+        #     np.save(f, total_embeddings_red)
+        # assert 1 == 0
+        # self.embedding_coreset = total_embeddings_red[selected_idx]
+        # # print('initial embedding size : ', total_embeddings.shape)
+        # print('final embedding size : ', self.embedding_coreset.shape)
+        # #faiss
+        with open('feature_set_resnet_layer_1.npy', 'rb') as f:
+            a = np.load(f)
+        self.embedding_coreset = np.delete(a, self.vals_to_zero, axis=1).copy(order='C')
+        self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
+        self.index.add(self.embedding_coreset) 
+        faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index_2.faiss'))
+        
     def fit_reducer_for_specific_layers(self):
         print('\nFITTING PARTIAL REDUCER\n')
         dl = self.train_loader_for_reduction
@@ -695,7 +740,7 @@ class STPM(pl.LightningModule):
                 run_time_validate = 0.0
             for _ in range(warm_up):
                 _, _, _, = prep_dirs(args.project_root_path)
-                _ = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss'))
+                _ = faiss.read_index(os.path.join(self.embedding_dir_path,'index_2.faiss'))
             for _ in range(reps):
                 if self.accelerator.__contains__("cuda") and torch.cuda.is_available():
                     starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True) # initialize cuda timers
@@ -707,7 +752,7 @@ class STPM(pl.LightningModule):
                     assert True, "Specified Accelerator not valid. Has to be \"cpu\" or \"gpu\"."
                 ### process start ###
                 self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
-                self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
+                self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index_2.faiss')) # load memory bank
                 # if torch.cuda.is_available():
                 #     res = faiss.StandardGpuResources()
                 #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
@@ -733,8 +778,9 @@ class STPM(pl.LightningModule):
                 with open(self.file_name_preparation_memory_bank.split('.')[0] + '_validation.txt', 'w') as f2:
                     f2.write(str(float(run_time_validate / reps))) # mean  
         else:
+            self.update_index()
             self.embedding_dir_path, self.sample_path, self.source_code_save_path = prep_dirs(args.project_root_path)   
-            self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index.faiss')) # load memory bank
+            self.index = faiss.read_index(os.path.join(self.embedding_dir_path,'index_2.faiss')) # load memory bank
             # if torch.cuda.is_available():
             #     res = faiss.StandardGpuResources()
             #     self.index = faiss.index_cpu_to_gpu(res, 0 ,self.index)
@@ -765,8 +811,8 @@ class STPM(pl.LightningModule):
         x, _, _, file_name, _ = batch
         if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
             x = x.cuda()
-        # if args.half_precision:
-        #     x = x.half()
+        if args.half_precision:
+            x = x.half()
         features = self(x)
         embeddings = []
         for k, feature in enumerate(features):
@@ -775,18 +821,18 @@ class STPM(pl.LightningModule):
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-                if not pooled_feature.device.__str__().__contains__(self.accelerator):
-                    pooled_feature = pooled_feature.to(self.accelerator)
+            if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                pooled_feature = pooled_feature.to(self.accelerator)
+            # pooled_feature = self.zero_out(pooled_feature=pooled_feature, vals_to_zero=self.vals_to_zero)
+            pooled_feature = np.delete(pooled_feature.cpu(), self.vals_to_zero, axis=1)
             embeddings.append(pooled_feature)
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
         self.embedding_list.extend(reshape_embedding(np.array(embedding)))
 
     def training_epoch_end(self, outputs): 
-        switch = 1
+        switch = 0
         total_embeddings = np.array(self.embedding_list) # shape: (115712, 448)
-        if args.half_precision:
-            total_embeddings = total_embeddings.astype('float16')
         # import time
         # with open(f'features_{int(time.time())}.npy', 'wb') as f:
         #     np.save(f, total_embeddings)
@@ -852,8 +898,6 @@ class STPM(pl.LightningModule):
             selected_idx = selector.select_batch(model=self.randomprojector, already_selected=[], N=int(total_embeddings_red.shape[0]*float(args.coreset_sampling_ratio)))
         else:
             total_embeddings_red = torch.Tensor(total_embeddings_red)
-            if args.half_precision:
-                total_embeddings_red = total_embeddings_red.to(torch.float16)
             sampler = k_center_greedy.KCenterGreedy(embedding=total_embeddings_red, sampling_ratio=float(args.coreset_sampling_ratio))
             selected_idx = sampler.select_coreset_idxs()
             total_embeddings_red = total_embeddings_red.numpy()
@@ -864,90 +908,84 @@ class STPM(pl.LightningModule):
         print('initial embedding size : ', total_embeddings.shape)
         print('final embedding size : ', self.embedding_coreset.shape)
         #faiss
-        if self.embedding_coreset.dtype != 'float32':
-            self.embedding_coreset = self.embedding_coreset.astype('float32') # beacause faiss does not work with another dtype
         self.index = faiss.IndexFlatL2(self.embedding_coreset.shape[1]) # original self.embedding_coreset.shape[1] = dimension
         self.index.add(self.embedding_coreset) 
-        faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index.faiss'))
+        faiss.write_index(self.index,  os.path.join(self.embedding_dir_path,'index_2.faiss'))
     
     def adaptive_pooling(self, feature):
-        # adapted for input_size 128
-        if self.pooling_strategy == 'identity':
-            m = nn.Identity()
-        
-        elif self.pooling_strategy == '':
+        if self.pooling_strategy == '':
             m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
         
-        elif self.pooling_strategy == '1':
+        if self.pooling_strategy == '1':
             # layer 1 & 3
             if feature.shape[3] == 16:
                 m = nn.AvgPool2d(kernel_size = 3, stride = 2, padding = 1)
             else:
                 m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
-        elif self.pooling_strategy == '1.1':
+        if self.pooling_strategy == '1.1':
             # layer 1 & 3
-            if feature.shape[3] == 32: # layer 1
-                m = nn.AvgPool2d(kernel_size = 9, stride = 4, padding = 3)
-            elif feature.shape[3] == 16: # layer 2
+            if feature.shape[3] == 16:
+                m = nn.AvgPool2d(kernel_size = 7, stride = 3, padding = 1)
+            elif feature.shape[3] == 8:
                 m = nn.AvgPool2d(kernel_size = 3, stride = 2, padding = 1)
-            else: # layer 3
+            else:
                 m = nn.AvgPool2d(kernel_size = 3, stride = 1, padding = 1)
-        elif self.pooling_strategy == '1.2':
+        if self.pooling_strategy == '1.2':
             # layer 1 & 3
-            if feature.shape[3] == 32: # layer 1
-                m = nn.AvgPool2d(kernel_size = 9, stride = 4, padding = 3)
-            elif feature.shape[3] == 16: # layer 2
+            if feature.shape[3] == 16:
+                m = nn.AvgPool2d(kernel_size = 7, stride = 3, padding = 1)
+            elif feature.shape[3] == 8:
                 m = nn.AvgPool3d(kernel_size = 3, stride = (1,2,2), padding = 1)
-            else: # layer 3
+            else:
                 m = nn.AvgPool3d(kernel_size = 3, stride = (2,1,1), padding = 1)
-        elif self.pooling_strategy == '2':
+        if self.pooling_strategy == '2':
             # layer 1 & 3
             if feature.shape[3] == 16:
                 m = nn.MaxPool2d(kernel_size = 5, stride = 2, padding = 1)
             else:
                 m = nn.MaxPool2d(kernel_size = 5, stride = 1, padding = 1)
-        elif self.pooling_strategy == '3':
+        if self.pooling_strategy == '3':
         # layer 1 & 3
             if feature.shape[3] == 16:
                 m = nn.AvgPool2d(kernel_size = 5, stride = 2, padding = 1)
             else:
                 m = nn.AvgPool2d(kernel_size = 5, stride = 1, padding = 1)
         
-        elif self.pooling_strategy == '4':
+        if self.pooling_strategy == '4':
         # layer 1 & 3
             if feature.shape[3] == 16:
                 m = nn.MaxPool2d(kernel_size = 5, stride = 2, padding = 1)
             else:
                 m = nn.MaxPool2d(kernel_size = 5, stride = 1, padding = 1)
-        elif self.pooling_strategy == 'adapt_avg_4':
+        if self.pooling_strategy == 'adapt_avg_4':
             m = nn.AdaptiveAvgPool2d(4)
-        elif self.pooling_strategy == 'adapt_avg_6':
+        if self.pooling_strategy == 'adapt_avg_6':
             m = nn.AdaptiveAvgPool2d(6)
-        elif self.pooling_strategy == 'adapt_avg_8':
+        if self.pooling_strategy == 'adapt_avg_8':
             m = nn.AdaptiveAvgPool2d(8)    
-        elif self.pooling_strategy == 'adapt_avg_10':
+        if self.pooling_strategy == 'adapt_avg_10':
             m = nn.AdaptiveAvgPool2d(10)
-        elif self.pooling_strategy == 'adapt_avg_12':
+        if self.pooling_strategy == 'adapt_avg_12':
             m = nn.AdaptiveAvgPool2d(12)
-        elif self.pooling_strategy == 'adapt_avg_14':
+        if self.pooling_strategy == 'adapt_avg_14':
             m = nn.AdaptiveAvgPool2d(14)
-        elif self.pooling_strategy == 'adapt_avg_16':
+        if self.pooling_strategy == 'adapt_avg_16':
             m = nn.AdaptiveAvgPool2d(16)
-        elif self.pooling_strategy == 'adapt_max_4':
+        if self.pooling_strategy == 'adapt_max_4':
             m = nn.AdaptiveMaxPool2d(4)
-        elif self.pooling_strategy == 'adapt_max_6':
+        if self.pooling_strategy == 'adapt_max_6':
             m = nn.AdaptiveMaxPool2d(6)
-        elif self.pooling_strategy == 'adapt_max_8':
+        if self.pooling_strategy == 'adapt_max_8':
             m = nn.AdaptiveMaxPool2d(8)    
-        elif self.pooling_strategy == 'adapt_max_10':
+        if self.pooling_strategy == 'adapt_max_10':
             m = nn.AdaptiveMaxPool2d(10)
-        elif self.pooling_strategy == 'adapt_max_12':
+        if self.pooling_strategy == 'adapt_max_12':
             m = nn.AdaptiveMaxPool2d(12)
-        elif self.pooling_strategy == 'adapt_max_14':
+        if self.pooling_strategy == 'adapt_max_14':
             m = nn.AdaptiveMaxPool2d(14)
-        elif self.pooling_strategy == 'adapt_max_16':
+        if self.pooling_strategy == 'adapt_max_16':
             m = nn.AdaptiveMaxPool2d(16)
-        elif self.pooling_strategy == "eff_1":
+        if self.pooling_strategy == "eff_1":
             if feature.shape[3] == 32:
                 m = nn.AvgPool2d(kernel_size = 9, stride = 3, padding = 0)
             if feature.shape[3] == 16:
@@ -957,6 +995,10 @@ class STPM(pl.LightningModule):
                 
                 
         return m(feature)
+    
+    def zero_out(self, pooled_feature, vals_to_zero):
+        pooled_feature[:,vals_to_zero,:,:] = 0
+        return pooled_feature
     
     def prediction_process_core(self, batch, batch_idx):
         '''
@@ -980,11 +1022,12 @@ class STPM(pl.LightningModule):
         #     # embeddings.append(feature_pooled) # add to embeddings pooled feature maps, does not change shape
         # # embedding_ = embedding_concat(embeddings[0], embeddings[1]) # concat two feature maps using unfold() from torch, leads to torch with shape [1, 384, 8, 8]
         # embedding_ = self.embedding_concat_frame(embeddings)
-        x, _, _, file_name, _ = batch
+        x, _, _, _, _ = batch
+        
         if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
             x = x.cuda()
-        # if args.half_precision:
-        #     x = x.half()
+        if args.half_precision:
+            x = x.half()
         features = self(x)
         embeddings = []
         for k, feature in enumerate(features):
@@ -993,8 +1036,10 @@ class STPM(pl.LightningModule):
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-                if not pooled_feature.device.__str__().__contains__(self.accelerator):
-                    pooled_feature = pooled_feature.to(self.accelerator)
+            if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                pooled_feature = pooled_feature.to(self.accelerator)
+            # pooled_feature = self.zero_out(pooled_feature=pooled_feature, vals_to_zero=self.vals_to_zero)
+            pooled_feature = np.delete(pooled_feature.cpu(), self.vals_to_zero, axis=1)
             embeddings.append(pooled_feature)
         # embedding = embedding_concat(embeddings[0], embeddings[1])
         embedding_ = self.embedding_concat_frame(embeddings=embeddings) # shape (batch, 448, 16, 16) --> default
@@ -1010,8 +1055,6 @@ class STPM(pl.LightningModule):
                 embedding_test = self.sklearn_fitter.transform(embedding_test)
             elif args.rand_projection:
                 embedding_test = self.rand_projector.transform(embedding_test).copy(order='c').astype('float32')
-            if embedding_test.dtype != 'float32':
-                embedding_test = embedding_test.astype('float32')
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied     
             anomaly_map = score_patches[:,0].reshape((int(math.sqrt(len(score_patches[:,0]))),int(math.sqrt(len(score_patches[:,0])))))
             a = int(args.load_size) # int, 64 
@@ -1044,10 +1087,8 @@ class STPM(pl.LightningModule):
                 transformed_flatten = self.rand_projector.transform(temp_flatten)
                 embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], self.rand_projector.n_components_))
                 embedding_test = embedding_test.copy(order='c').astype('float32')
-            if embedding_test[0].dtype != 'float32':
-                score_patches = [self.index.search(this_embedding_test.astype('float32'), k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
-            else:
-                score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
+                
+            score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
             anomaly_map = [score_patch[:,0].reshape((int(math.sqrt(len(score_patch[:,0]))),int(math.sqrt(len(score_patch[:,0]))))) for score_patch in score_patches]
             a = int(args.load_size)
             anomaly_map_resized = [cv2.resize(this_anomaly_map, (a, a)) for this_anomaly_map in anomaly_map]
@@ -1072,8 +1113,8 @@ class STPM(pl.LightningModule):
         # extract embedding
         if torch.cuda.is_available() and self.accelerator.__contains__("cuda") and not x.is_cuda:
             x = x.cuda()
-        # if args.half_precision:
-        #     x = x.half()        
+        if args.half_precision:
+            x = x.half()        
         features = self(x)
         ######################################################################################################################################################
         # embedding of features
@@ -1088,8 +1129,10 @@ class STPM(pl.LightningModule):
                 org_shape = pooled_feature.shape
                 pooled_feature = self.partial_reducer.transform(np.reshape(pooled_feature.cpu(), (-1, org_shape[1])))
                 pooled_feature = torch.from_numpy(np.reshape(pooled_feature, (org_shape[0],-1, org_shape[2], org_shape[3])))
-                if not pooled_feature.device.__str__().__contains__(self.accelerator):
-                    pooled_feature = pooled_feature.to(self.accelerator)
+            if not pooled_feature.device.__str__().__contains__(self.accelerator):
+                pooled_feature = pooled_feature.to(self.accelerator)
+            # pooled_feature = self.zero_out(pooled_feature=pooled_feature, vals_to_zero=self.vals_to_zero)
+            pooled_feature = np.delete(pooled_feature.cpu(), self.vals_to_zero, axis=1)
             embeddings.append(pooled_feature)
         # for feature in features: # features: list of feature maps, size: [1,128,8,8] & [1,256,4,4] (first entry --> batch_size = 1)
         #     feature_pooled = self.adaptive_pooling(feature) # define avg Pooling filter
@@ -1140,8 +1183,7 @@ class STPM(pl.LightningModule):
                     torch.cuda.synchronize()
                 # print('\nTransform Features started...')
                 # embedding_test = np.reshape(transformed_flatten,(embedding_test.shape[0], embedding_test.shape[1], int(embedding_test.shape[2]*args.shrinking_factor)))
-                embedding_test = self.rand_projector.transform(embedding_test).copy(order='c').astype('float32')
-                
+                embedding_test = self.rand_projector.transform(embedding_test).copy(order='c').astype('float32')  
                 
             resulting_features = (embedding_test.shape[0], embedding_test.shape[1]) 
         ######################################################################################################################################################
@@ -1150,8 +1192,6 @@ class STPM(pl.LightningModule):
             if torch.cuda.is_available() and self.accelerator.__contains__("cuda"):
                 t_2_gpu.record()
                 torch.cuda.synchronize()
-            if embedding_test.dtype != 'float32':
-                embedding_test = embedding_test.astype('float32')
             score_patches, _ = self.index.search(embedding_test , k=args.n_neighbors) # brutal force search of k nearest neighbours using faiss.IndexFlatL2.search; shape [64,9], memory bank is utilizied
         ######################################################################################################################################################
             # create anomaly map
@@ -1214,10 +1254,7 @@ class STPM(pl.LightningModule):
                 torch.cuda.synchronize()
             
             resulting_features = (embedding_test[0].shape[0], embedding_test[0].shape[1])
-            if embedding_test[0].dtype != 'float32':
-                score_patches = [self.index.search(this_embedding_test.astype('float32'), k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
-            else:
-                score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
+            score_patches = [self.index.search(this_embedding_test, k=args.n_neighbors)[0] for this_embedding_test in embedding_test]
         ######################################################################################################################################################
             # create anomaly map
             t_3_cpu = time.perf_counter() 
@@ -1263,8 +1300,6 @@ class STPM(pl.LightningModule):
         self.img_path_list.extend(file_name) # same for file_name
         # save images
         x = self.inv_normalize(x) # inverse transformation of img
-        if x.dtype != torch.float32:
-            x = x.to(torch.float32)
         input_x = cv2.cvtColor(x.permute(0,2,3,1).cpu().numpy()[0]*255, cv2.COLOR_BGR2RGB) # further transformation
         self.save_anomaly_map(anomaly_map_resized_blur, input_x, gt_np*255, file_name[0], x_type[0]) # save of everything
 
@@ -1405,6 +1440,11 @@ class STPM(pl.LightningModule):
         # thresholding
         # cal_confusion_matrix(self.gt_list_img_lvl, self.pred_list_img_lvl, img_path_list = self.img_path_list, thresh = 0.00097)
         # print()
+        write_layer = [el for el in self.vals_to_zero if el not in self.removed_layers]
+        write_str = f'{write_layer},{img_auc},{pixel_auc}\n'
+        with open(f'layer_1_resnet_with_removed_{self.removed_layers.__str__()}.txt', 'a+') as g:
+            g.write(write_str)
+        
         with open(args.project_root_path + r'/results.txt', 'a') as f:
             f.write(args.category + ' : ' + str(values) + '\n')
 
@@ -1414,19 +1454,19 @@ def get_args():
     parser.add_argument('--dataset_path', default=r'./mvtec_anomaly_detection')#./MVTec') # 'D:\Dataset\mvtec_anomaly_detection')#
     parser.add_argument('--category', default='own')
     parser.add_argument('--num_epochs', default=1, type = int) # 1 iteration is enough
-    parser.add_argument('--batch_size', default=1, type = int)
-    parser.add_argument('--load_size', default=128, type = int) 
-    parser.add_argument('--input_size', default=128, type = int) # using same input size and load size for our data
-    parser.add_argument('--feature_maps_selected', default=[1,3], type=int, nargs='+')
-    parser.add_argument('--coreset_sampling_ratio', default=0.01, type = float)
-    parser.add_argument('--pooling_strategy', default='', type = str)
+    parser.add_argument('--batch_size', default=7, type = int)
+    parser.add_argument('--load_size', default=64, type = int) 
+    parser.add_argument('--input_size', default=64, type = int) # using same input size and load size for our data
+    parser.add_argument('--feature_maps_selected', default=[1], type=int, nargs='+')
+    parser.add_argument('--coreset_sampling_ratio', default=1.0, type = float)
+    parser.add_argument('--pooling_strategy', default='1.1', type = str)
     parser.add_argument('--avgpool_kernel', default=3, type=int)
     parser.add_argument('--avgpool_stride', default=1, type=int)
     parser.add_argument('--avgpool_padding', default=1, type=int)
     parser.add_argument('--backbone', default = 'resnet', type = str)
     parser.add_argument('--project_root_path', default=r'./test') # location to save result
     parser.add_argument('--save_src_code', default=True) 
-    parser.add_argument('--save_anomaly_map', default=True)
+    parser.add_argument('--save_anomaly_map', default=False)
     parser.add_argument('--n_neighbors', type=int, default=9)
     parser.add_argument('--propotion', type=int, default=452) # number of training samples used, default 452=all samples 
     parser.add_argument('--pre_weight', default='imagenet')
@@ -1444,7 +1484,7 @@ def get_args():
     parser.add_argument('--target_depth', type=int, default=120)
     parser.add_argument('--rand_projection', type=bool, default=False)
     parser.add_argument('--rand_proj_components', type=int, default=0)
-    parser.add_argument('--pruning', type=bool, default=False)
+    parser.add_argument('--pruning', type=bool, default=True)
     parser.add_argument('--half_precision', type=bool, default=False)
     parser.add_argument('--partial_reduction', type=bool, default=False)
     parser.add_argument('--feature_map_to_reduce', type=int, nargs='+', default = []) # not the number of the layer! but the number in line (starting with 1). E.g.: if feature_maps_selcted == [1,3,5] and u want to decrease features of layer 5 --> feature_map_to_reduce = 2. Only one layer possible at the moment.
@@ -1460,24 +1500,50 @@ def get_args():
 
 if __name__ == '__main__':
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
+    remaining_layers = list(range(64))
+    removed_layers = [] # initial
+    # removed_layers = [178, 77, 47, 153, 32, 3, 200, 224, 88, 155, 242, 30, 101, 117, 118, 115, 234, 49, 22, 141, 28, 183, 124, 54, 53, 228, 204, 76, 144, 162] # based on zero removed (first 12) and based on 12 removed (last 12)
+    remaining_layers = [int(el) for el in remaining_layers if el not in removed_layers]
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "temp")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","temp"))
-    args = get_args()
-    trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator)#, precision=16) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
-    model = STPM(hparams=args)
-    model.measure_latences = True # if not specified this is False
-    model.file_name_latences = args.__dict__['file_name_latences']
-    model.file_name_preparation_memory_bank = os.path.join(os.path.dirname(__file__), "results", "temp", args.__dict__['file_name_latences'].split('.')[0] + '_preparation_memory_bank.csv')
-    model.accelerator = accelerator
-    if args.phase == 'train':
-        trainer.fit(model)
-        trainer.test(model)
-    elif args.phase == 'test':
-        trainer.test(model)
+    for k in range(len(remaining_layers) - 1):
+        args = get_args()
+        trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
+        model = STPM(hparams=args)
+        model.measure_latences = False # if not specified this is False
+        model.accelerator = accelerator
+        model.removed_layers = removed_layers
+        for layer in remaining_layers:
+            zeroes = removed_layers + [layer]
+            model.vals_to_zero = zeroes
+            model.file_name_latences = args.__dict__['file_name_latences']
+            model.file_name_preparation_memory_bank = os.path.join(os.path.dirname(__file__), "results", "temp", args.__dict__['file_name_latences'].split('.')[0] + '_preparation_memory_bank.csv')
+
+            if args.phase == 'train':
+                if k == 0:
+                    trainer.fit(model)
+                trainer.test(model)
+            elif args.phase == 'test':
+                trainer.test(model)
+                
+        with open(f'layer_1_resnet_with_removed_{removed_layers.__str__()}.txt', 'r') as f:
+            str_raw = f.read()
+        str_list = str_raw.split('\n')[:-1]
+        str_divided = np.array([el.split(',') for el in str_list])
+        for k in range(len(remaining_layers)):
+            str_divided[k,0] = int(str_divided[k,0].split('[')[1].split(']')[0])
+        str_divided = str_divided.astype('float')
+        pd_res = pd.DataFrame({"number of Layer": str_divided[:,0], "img_auc": str_divided[:,1], "pixel_auc": str_divided[:,2]}).sort_values("img_auc", ascending=False)
+        pd_res.to_csv(f'result_after_run_{k}_with_removed_layers_{removed_layers.__str__()}_resnet_layer_1.csv')
+        layer_to_be_removed = [int(pd_res.iloc[0][0]), int(pd_res.iloc[1][0]), int(pd_res.iloc[2][0])]
+        removed_layers += layer_to_be_removed
+        remaining_layers = [int(el) for el in remaining_layers if el not in removed_layers]
         
+        
+            
     # all_latencies = genfromtxt(model.file_name_latences, delimiter='\t')[:-1]
     # print(f'Average Latency: {round(sum(all_latencies)/len(all_latencies), 3)} ms')
     

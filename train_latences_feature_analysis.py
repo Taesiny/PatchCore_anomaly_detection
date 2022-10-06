@@ -903,8 +903,8 @@ class STPM(pl.LightningModule):
             sampler = k_center_greedy.KCenterGreedy(embedding=total_embeddings_red, sampling_ratio=float(args.coreset_sampling_ratio))
             selected_idx = sampler.select_coreset_idxs()
             total_embeddings_red = total_embeddings_red.numpy()
-        with open(file=f'selected_idx_{int(time.time())}.txt', mode='w') as f:
-            f.write(str(selected_idx))
+        # with open(file=f'selected_idx_{int(time.time())}.txt', mode='w') as f:
+        #     f.write(str(selected_idx))
 
         self.embedding_coreset = total_embeddings_red[selected_idx]
         print('initial embedding size : ', total_embeddings.shape)
@@ -1503,13 +1503,15 @@ def get_args():
 if __name__ == '__main__':
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # not needed anywhere
     remaining_layers = list(range(256))
-    removed_layers = []
+    # removed_layers = [] # initial
+    removed_layers = [178, 77, 47, 153, 32, 3, 200, 224, 88, 155, 242, 30, 101, 117, 118, 115, 234, 49, 22, 141, 28, 183, 124, 54]# 53, 228, 204, 76, 144, 162] # based on zero removed (first 12) and based on 12 removed (last 12)
+    remaining_layers = [int(el) for el in remaining_layers if el not in removed_layers]
     accelerator = Acceler(1).name # choose 1 for gpu, 2 for cpu
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "csv")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","csv"))
     if not os.path.exists(os.path.join(os.path.dirname(__file__), "results", "temp")):
         os.makedirs(os.path.join(os.path.dirname(__file__), "results","temp"))
-    for k in range(255):
+    for k in range(len(remaining_layers) - 1):
         args = get_args()
         trainer = pl.Trainer.from_argparse_args(args, default_root_dir=os.path.join(args.project_root_path, args.category), max_epochs=args.num_epochs, accelerator=accelerator) #, gpus=1) #, check_val_every_n_epoch=args.val_freq,  num_sanity_val_steps=0) # ,fast_dev_run=True)
         model = STPM(hparams=args)
@@ -1535,7 +1537,7 @@ if __name__ == '__main__':
         for k in range(len(remaining_layers)):
             str_divided[k,0] = int(str_divided[k,0].split('[')[1].split(']')[0])
         str_divided = str_divided.astype('float')
-        pd_res = pd.DataFrame({"number of Layer": str_divided[:,0], "img_auc": str_divided[:,1], "pixel_auc": str_divided[:,2]}).sort_values("img_auc")
+        pd_res = pd.DataFrame({"number of Layer": str_divided[:,0], "img_auc": str_divided[:,1], "pixel_auc": str_divided[:,2]}).sort_values("img_auc", ascending=False)
         pd_res.to_csv(f'result_after_run_{k}_with_removed_layers_{removed_layers.__str__()}_resnet_layer_3_2.csv')
         layer_to_be_removed = [int(pd_res.iloc[0][0]), int(pd_res.iloc[1][0]), int(pd_res.iloc[2][0])]
         removed_layers += layer_to_be_removed
